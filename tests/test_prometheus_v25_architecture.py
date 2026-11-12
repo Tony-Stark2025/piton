@@ -526,4 +526,157 @@ async def test_immunology_dependency_upgrade_patch_and_mcp_publish_pr(tmp_path):
         assert "mintOOBCanaryUI" in dash_resp.text
 
 
+@pytest.mark.asyncio
+async def test_semantic_logic_auditor_and_three_tier_disposition(tmp_path):
+    """Verifies live negative-quantity business logic PoV (Tier A) and non-oracle timing/crypto sink triage (Tier B)."""
+    from prometheus.pentest.engine import PrometheusAdversarialEngine
+    from prometheus.pentest.models import EvidenceDisposition
+
+    # Create a real Python route file with a non-constant-time HMAC comparison timing leak
+    svc_file = tmp_path / "webhooks.py"
+    svc_file.write_text(
+        '@app.post("/api/v1/webhooks/verify")\n'
+        "async def verify_webhook(payload: dict):\n"
+        '    expected_signature = "abc"\n'
+        '    if payload.get("sig") == expected_signature:\n'
+        '        return {"ok": True}\n'
+        '    return {"ok": False}\n',
+        encoding="utf-8",
+    )
+
+    biz_app = FastAPI()
+
+    @biz_app.post("/api/v1/cart/checkout")
+    async def checkout_cart(body: dict):
+        return {"total": body.get("quantity", 1) * 100}
+
+    @biz_app.post("/api/v1/webhooks/verify")
+    async def verify_webhook(body: dict):
+        return {"ok": False}
+
+    transport = httpx.ASGITransport(app=biz_app)
+    prober = ExploitProber(base_url="http://testserver", transport=transport, allow_loopback=True)
+    try:
+        ctx = StateSynthesizer().create_dual_context()
+        ep_cart = RouteEndpoint(path="/api/v1/cart/checkout", method=HttpMethod.POST, path_parameters=[])
+        ep_hook = RouteEndpoint(path="/api/v1/webhooks/verify", method=HttpMethod.POST, path_parameters=[])
+
+        engine = PrometheusAdversarialEngine(
+            base_url="http://testserver",
+            endpoints=[ep_cart, ep_hook],
+            context=ctx,
+            prober=prober,
+            target_dir=str(tmp_path),
+            max_turns=10,
+        )
+        res = await engine.run()
+
+        # 1. Negative quantity accepted by /api/v1/cart/checkout -> Tier A Verified PoV
+        assert any(
+            v.target_endpoint == "/api/v1/cart/checkout"
+            and v.vector == VulnerabilityCategory.BUSINESS_LOGIC
+            and v.disposition == EvidenceDisposition.TIER_A_VERIFIED_POV
+            for v in res["vulnerabilities"]
+        )
+
+        # 2. Timing side-channel (`== expected_signature`) on /api/v1/webhooks/verify -> Tier B Semantic Triage (not dropped!)
+        assert any(
+            t.target_endpoint == "/api/v1/webhooks/verify"
+            and t.disposition == EvidenceDisposition.TIER_B_SEMANTIC_TRIAGE
+            and "timing side-channel" in (t.remediation_guidance + " " + (t.triage_reason or "")).lower()
+            for t in res["triage_findings"]
+        )
+    finally:
+        await prober.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cegis_compiled_ast_execution_verification():
+    """Verifies DualPassVerifier compiles and executes real patched Python handler AST instead of closure fallback."""
+    from fastapi import Depends, HTTPException, Request
+    from prometheus.pentest.cegis_verifier import DualPassVerifier
+    from prometheus.pentest.models import AutoPatchResult
+
+    cegis_app = FastAPI()
+    ITEMS = {"item-alpha-001": {"id": "item-alpha-001", "tenant_id": "org-alpha-victim-001", "secret": "s3cr3t"}}
+
+    def get_tenant(request: Request) -> str:
+        return request.headers.get("x-tenant-id", "")
+
+    @cegis_app.get("/api/v1/items/{item_id}")
+    async def get_item(item_id: str, tenant_id: str = Depends(get_tenant)):
+        item = ITEMS.get(item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Not found")
+        return item
+
+    # Real patched handler code that enforces tenant_id check
+    patched_python_code = (
+        '@cegis_app.get("/api/v1/items/{item_id}")\n'
+        "async def get_item(item_id: str, tenant_id: str = Depends(get_tenant)):\n"
+        "    item = ITEMS.get(item_id)\n"
+        "    if not item:\n"
+        '        raise HTTPException(status_code=404, detail="Not found")\n'
+        '    if item.get("tenant_id") != tenant_id:\n'
+        '        raise HTTPException(status_code=403, detail="Forbidden: Tenant mismatch")\n'
+        "    return item\n"
+    )
+
+    transport = httpx.ASGITransport(app=cegis_app)
+    prober = ExploitProber(base_url="http://testserver", transport=transport, allow_loopback=True)
+    try:
+        verifier = DualPassVerifier(prober=prober)
+        ctx = StateSynthesizer().create_dual_context()
+        ctx.tenant_alpha.headers["x-tenant-id"] = "org-alpha-victim-001"
+        ctx.tenant_beta.headers["x-tenant-id"] = "org-beta-attacker-999"
+        ctx.seeded_resources["item"] = {"resource_id": "item-alpha-001", "canary_marker": "s3cr3t"}
+
+        route = RouteEndpoint(path="/api/v1/items/{item_id}", method=HttpMethod.GET, path_parameters=["item_id"])
+        patch = AutoPatchResult(
+            target_file="app/api/items.py",
+            git_diff="--- a/app/api/items.py\n+++ b/app/api/items.py\n@@ -1 +1 @@\n",
+            verification_status="PENDING",
+            previous_exploit_status=200,
+            post_patch_status=0,
+            patched_code=patched_python_code,
+        )
+        ok, status_msg, atk_code, vic_code = await verifier.verify_patch_dual_pass(
+            route=route,
+            context=ctx,
+            target_resource_type="item",
+            patch=patch,
+        )
+        assert ok is True
+        assert status_msg == "CERTIFIED_FIX"
+        assert atk_code == 403
+        assert vic_code == 200
+    finally:
+        await prober.aclose()
+
+
+def test_immunology_route_to_cve_bridge(tmp_path):
+    """Verifies Route-to-CVE bridge maps reachable dependency call sites to HTTP API routes."""
+    helper_file = tmp_path / "http_client.py"
+    helper_file.write_text("import httpx\n\ndef fetch_remote(url: str):\n    return httpx.get(url)\n", encoding="utf-8")
+
+    route_file = tmp_path / "proxy_routes.py"
+    route_file.write_text(
+        "from fastapi import APIRouter\n"
+        "from http_client import fetch_remote\n\n"
+        "router = APIRouter()\n\n"
+        '@router.post("/api/v1/webhooks/dispatch")\n'
+        "async def dispatch_webhook(url: str):\n"
+        "    return fetch_remote(url)\n",
+        encoding="utf-8",
+    )
+
+    reachable_files, call_sites = ContinuousImmunologyEngine.trace_call_graph_reachability(str(tmp_path), "httpx")
+    assert "http_client.py" in reachable_files
+    assert any("fetch_remote" in cs for cs in call_sites)
+
+    exposed_routes = ContinuousImmunologyEngine.map_files_to_exposed_routes(str(tmp_path), reachable_files)
+    assert "POST /api/v1/webhooks/dispatch" in exposed_routes
+
+
+
 
