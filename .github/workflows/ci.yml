@@ -9,6 +9,7 @@ on:
 jobs:
   test-and-validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     strategy:
       matrix:
@@ -36,7 +37,9 @@ jobs:
           USE_VERTEX_AI: "false"
           GEMINI_API_KEY: ""
         run: |
-          pytest tests/test_prometheus_v25_architecture.py tests/test_commercial_saas_and_agentic_owasp.py tests/unit/ tests/adversarial/ tests/integration/ tests/test_endpoints.py -v --tb=short
+          timeout 300 pytest tests/unit/ -v --tb=short --durations=10
+          timeout 300 pytest tests/integration/ -v --tb=short --durations=10
+          timeout 300 pytest tests/test_prometheus_v25_architecture.py tests/test_commercial_saas_and_agentic_owasp.py tests/adversarial/ tests/test_endpoints.py -v --tb=short --durations=10
 
       - name: Verify Docker Container Build
         run: |
