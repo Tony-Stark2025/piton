@@ -457,7 +457,11 @@ def terminate_process_tree(proc: Any) -> None:
         else:
             import os, signal
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                pgid = os.getpgid(proc.pid)
+                if pgid != os.getpgrp():
+                    os.killpg(pgid, signal.SIGKILL)
+                elif proc.poll() is None:
+                    proc.kill()
             except Exception:
                 if proc.poll() is None:
                     proc.kill()
