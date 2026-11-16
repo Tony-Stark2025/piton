@@ -99,7 +99,9 @@ class ProviderManager:
     _gcloud_project_checked: bool = False
     _cached_gcloud_token: Optional[str] = None
     _gcloud_token_expiry: float = 0.0
+    _gcloud_token_checked: bool = False
     _working_vertex_model: Optional[str] = None
+    _vertex_circuit_open: bool = False
 
     TIER_TIMEOUT_SECONDS: Dict[str, float] = {
         "recon": 8.0,
@@ -136,6 +138,7 @@ class ProviderManager:
         self.last_model_used: Optional[str] = None
         self.last_tier_used: Optional[str] = None
         self.total_llm_calls: int = 0
+        self.max_llm_calls_per_scan: int = 25
         self.tier_usage_counts: Dict[str, int] = {"recon": 0, "explore": 0, "swe_repair": 0}
 
     @classmethod
@@ -209,8 +212,11 @@ class ProviderManager:
     def _get_gcloud_access_token(cls) -> Optional[str]:
         """Obtains and caches an OAuth2 access token from gcloud SQLite cache (<1ms) or CLI refresh."""
         now = time.time()
-        if cls._cached_gcloud_token and now < cls._gcloud_token_expiry:
+        if cls._gcloud_token_checked and now < cls._gcloud_token_expiry:
             return cls._cached_gcloud_token
+
+        cls._gcloud_token_checked = True
+        cls._gcloud_token_expiry = now + 300.0
 
         # 1. Fast <1ms check against gcloud's local SQLite access_tokens.db
         try:
@@ -243,7 +249,7 @@ class ProviderManager:
         except Exception:
             pass
 
-        # 2. Refresh via gcloud CLI
+        # 2. Fast refresh via gcloud CLI (bounded at 3.5s per attempt, cached on failure)
         try:
             import shutil
             import subprocess
@@ -258,7 +264,7 @@ class ProviderManager:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=15.0,
+                    timeout=3.5,
                     check=False,
                 )
                 token = (proc.stdout or "").strip()
@@ -449,6 +455,10 @@ class ProviderManager:
             if cached is not None:
                 return cached
 
+        if self.total_llm_calls >= self.max_llm_calls_per_scan:
+            logger.warning(f"⚠️ [ProviderManager] Per-scan LLM call budget ({self.max_llm_calls_per_scan}) reached. Falling back deterministically.")
+            return None
+
         provider, config = self.resolve_provider()
         if provider == ProviderType.DETERMINISTIC:
             logger.info("⚡ [ProviderManager] No active LLM credentials. Using deterministic engine.")
@@ -526,20 +536,24 @@ class ProviderManager:
         Calls Google Cloud Vertex AI using active gcloud CLI OAuth2 bearer token
         against the Vertex AI Global Endpoint (locations/global on aiplatform.googleapis.com)
         required for Gemini 3 series models (gemini-3.7-flash, gemini-3.8-flash),
-        or falls back to the google.genai unified SDK (location='global').
+        or falls back to the google.genai unified SDK (location='global') on Cloud Run.
         """
+        if self.__class__._vertex_circuit_open:
+            return None
+
         project = config.get("project") or self._detect_gcloud_project()
         location = config.get("location", "global")
         primary_model = config.get("model", settings.gemini_model)
 
         # Active October 2026 Gemini 3 model candidates (Gemini 2.5 series retired Oct 20, 2026)
         candidates: List[str] = []
-        for m in (self._working_vertex_model, primary_model, "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"):
+        for m in (self._working_vertex_model, primary_model, "gemini-3.8-flash", "gemini-3.7-flash"):
             if m and m not in candidates:
                 candidates.append(m)
 
+        per_candidate_timeout = min(float(config.get("timeout", settings.llm_request_timeout_seconds)), 4.5)
+
         # 1. Direct Vertex AI REST endpoint using gcloud CLI OAuth2 token
-        # Gemini 3 models on Vertex AI are served on the global endpoint (aiplatform.googleapis.com/.../locations/global)
         gcloud_token = self._get_gcloud_access_token()
         if gcloud_token and project:
             client = await self._get_client()
@@ -547,6 +561,7 @@ class ProviderManager:
                 "Authorization": f"Bearer {gcloud_token}",
                 "Content-Type": "application/json",
                 "User-Agent": "google-cloud-sdk",
+                "x-goog-user-project": str(project),
             }
             payload: Dict[str, Any] = {
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -559,7 +574,6 @@ class ProviderManager:
                 payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
 
             for candidate_model in candidates:
-                # Gemini 3 series requires locations/global on aiplatform.googleapis.com
                 effective_loc = "global" if candidate_model.startswith("gemini-3") else location
                 host = (
                     "https://aiplatform.googleapis.com"
@@ -575,7 +589,7 @@ class ProviderManager:
                         url,
                         headers=headers,
                         json=payload,
-                        timeout=config.get("timeout", settings.llm_request_timeout_seconds),
+                        timeout=per_candidate_timeout,
                     )
                     if resp.status_code == 200:
                         data = resp.json()
@@ -588,9 +602,14 @@ class ProviderManager:
                                 return parts[0]["text"]
                 except Exception as exc:
                     logger.debug(f"Vertex REST attempt on {candidate_model} ({effective_loc}) failed: {exc}")
+            self.__class__._vertex_circuit_open = True
             return None
 
-        # 2. Fallback to google.genai unified SDK (for Cloud Run metadata server ADC)
+        # 2. Fallback to google.genai unified SDK ONLY when running on Cloud Run metadata server (K_SERVICE)
+        if not os.getenv("K_SERVICE"):
+            self.__class__._vertex_circuit_open = True
+            return None
+
         from google import genai
         from google.genai import types
 
@@ -625,9 +644,10 @@ class ProviderManager:
                         return resp.text
                 except Exception:
                     continue
+            self.__class__._vertex_circuit_open = True
             return None
 
-        return await asyncio.wait_for(_call(), timeout=config.get("timeout", settings.llm_request_timeout_seconds))
+        return await asyncio.wait_for(_call(), timeout=per_candidate_timeout)
 
     async def _call_gemini_byok(
         self, prompt: str, config: Dict[str, Any], system_instruction: Optional[str]

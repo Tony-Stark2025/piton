@@ -1,151 +1,104 @@
-name: "Prometheus Autonomous API Security Gate"
-description: "Autonomously verifies API vulnerabilities (BOLA/IDOR, BFLA) and synthesizes zero-regression patches in CI/CD"
+name: "Prometheus Enterprise Autonomous AppSec & Patch Gate"
+description: "In-VPC Glass-Box API Exploit Verification, 3-Tier PoV/Triage Disposition, CEGIS Auto-Patching, and Coding-Agent Supply-Chain Firewall."
 author: "Prometheus Enterprise"
 
+branding:
+  icon: "shield"
+  color: "red"
+
 inputs:
+  mode:
+    description: "Execution mode: 'pentest' (live API + Glass-Box PR gate) or 'immunology' (lockfile + AST reachability + GitSpawn/Plugin4Shell scan)"
+    required: false
+    default: "pentest"
   target-url:
-    description: "Base URL of the running API service or preview environment"
-    required: true
+    description: "Target preview/staging API base URL (used in 'pentest' mode)"
+    required: false
     default: "http://127.0.0.1:8000"
-  spec-path:
-    description: "Path to OpenAPI 3.0/3.1 or Swagger 2.0 JSON or YAML schema file"
-    required: false
   spec-url:
-    description: "URL to OpenAPI specification JSON"
+    description: "OpenAPI schema URL or relative path"
     required: false
+    default: "/openapi.json"
+  target-dir:
+    description: "Repository directory for Glass-Box AST reachability, Route-to-CVE mapping, and SWE patch synthesis"
+    required: false
+    default: "."
   app-cmd:
-    description: "Optional background command to boot preview server (e.g. npm start or uvicorn app:main)"
+    description: "Optional command to boot the target application before scanning"
     required: false
+    default: ""
   fail-on-exploit:
-    description: "Whether to fail the CI/CD pipeline if a critical exploit is verified"
+    description: "Exit with code 1 if any Tier A Verified PoV is confirmed"
     required: false
     default: "true"
-  github-token:
-    description: "GitHub token to post PR review comments with reproduction commands and patches"
+  output-sarif:
+    description: "Output file path for SARIF v2.1.0 report"
     required: false
-    default: ${{ github.token }}
-  jwt-secret:
-    description: "JWT signing secret for dual-tenant token generation (optional)"
+    default: "prometheus-results.sarif"
+  output-markdown:
+    description: "Output file path for Staff-Engineer Markdown PR report"
     required: false
-  target-dir:
-    description: "Local repository directory for Glass-Box route extraction, AST reachability, and Contextual SWE repair"
+    default: "prometheus-report.md"
+  output-diff:
+    description: "Output file path for compiler-verified unified git diff"
     required: false
-  immunology:
-    description: "Set to 'true' to run Event-Driven Continuous Immunology sweep (THN + OSV.dev + AST Call-Graph)"
-    required: false
-    default: "false"
-  publish-pr:
-    description: "Optional GitHub repository ('owner/repo') to automatically open a remediation Pull Request"
-    required: false
+    default: "prometheus-fix.patch"
 
 outputs:
-  exploits-count:
-    description: "Number of confirmed, zero-false-positive exploits found"
-    value: ${{ steps.run-scan.outputs.exploits_count }}
-  patches-count:
-    description: "Number of certified AST code remediation patches generated"
-    value: ${{ steps.run-scan.outputs.patches_count }}
-  markdown-report:
-    description: "Path to generated GitHub PR Markdown report"
-    value: ${{ steps.run-scan.outputs.markdown_path }}
+  sarif-file:
+    description: "Path to generated SARIF report"
+    value: ${{ inputs.output-sarif }}
+  markdown-file:
+    description: "Path to generated Markdown PR report"
+    value: ${{ inputs.output-markdown }}
+  diff-file:
+    description: "Path to generated unified git diff patch"
+    value: ${{ inputs.output-diff }}
 
 runs:
   using: "composite"
   steps:
-    - name: Set up Python
+    - name: Set up Python 3.12
       uses: actions/setup-python@v5
       with:
-        python-version: "3.11"
+        python-version: "3.12"
 
-    - name: Install Prometheus Pentest Engine
+    - name: Install Prometheus Runner Dependencies
       shell: bash
       run: |
         python -m pip install --upgrade pip
-        pip install "${{ github.action_path }}"
+        pip install -r "${{ github.action_path }}/requirements.txt"
 
-    - name: Execute Autonomous Exploit Verification Gate
-      id: run-scan
+    - name: Execute Prometheus Security Gate
       shell: bash
       env:
-        INPUT_TARGET_URL: ${{ inputs.target-url }}
-        INPUT_SPEC_PATH: ${{ inputs.spec-path }}
-        INPUT_SPEC_URL: ${{ inputs.spec-url }}
-        INPUT_APP_CMD: ${{ inputs.app-cmd }}
-        INPUT_FAIL_ON_EXPLOIT: ${{ inputs.fail-on-exploit }}
-        INPUT_JWT_SECRET: ${{ inputs.jwt-secret }}
-        INPUT_TARGET_DIR: ${{ inputs.target-dir }}
-        INPUT_IMMUNOLOGY: ${{ inputs.immunology }}
-        INPUT_PUBLISH_PR: ${{ inputs.publish-pr }}
-        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PYTHONPATH: ${{ github.action_path }}
       run: |
-        ARGS=(
-          "--target-url" "$INPUT_TARGET_URL"
-          "--output-markdown" "prometheus-pr-report.md"
-          "--output-diff" "prometheus-patch.diff"
-        )
-
-        if [ "$INPUT_IMMUNOLOGY" = "true" ]; then
-          ARGS+=("--immunology")
-        elif [ -n "$INPUT_SPEC_PATH" ]; then
-          ARGS+=("--spec" "$INPUT_SPEC_PATH")
-        elif [ -n "$INPUT_SPEC_URL" ]; then
-          ARGS+=("--spec-url" "$INPUT_SPEC_URL")
-        elif [ -n "$INPUT_TARGET_DIR" ]; then
-          ARGS+=("--target-dir" "$INPUT_TARGET_DIR")
+        if [ "${{ inputs.mode }}" = "immunology" ]; then
+          python -m prometheus.cli_scan --immunology --target-dir "${{ inputs.target-dir }}" | tee prometheus-immunology.json
+          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            echo "## 🛡️ Prometheus Continuous Immunology & Agentic Supply-Chain Report" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            head -n 80 prometheus-immunology.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
         else
-          ARGS+=("--demo")
+          ARGS=(
+            "--target-url" "${{ inputs.target-url }}"
+            "--spec-url" "${{ inputs.spec-url }}"
+            "--target-dir" "${{ inputs.target-dir }}"
+            "--output-sarif" "${{ inputs.output-sarif }}"
+            "--output-markdown" "${{ inputs.output-markdown }}"
+            "--output-diff" "${{ inputs.output-diff }}"
+          )
+          if [ -n "${{ inputs.app-cmd }}" ]; then
+            ARGS+=("--app-cmd" "${{ inputs.app-cmd }}")
+          fi
+          if [ "${{ inputs.fail-on-exploit }}" = "true" ]; then
+            ARGS+=("--fail-on-exploit")
+          fi
+          python -m prometheus.cli_scan "${ARGS[@]}"
+          if [ -f "${{ inputs.output-markdown }}" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+            cat "${{ inputs.output-markdown }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
         fi
-
-        if [ -n "$INPUT_TARGET_DIR" ]; then
-          ARGS+=("--target-dir" "$INPUT_TARGET_DIR")
-        fi
-
-        if [ -n "$INPUT_PUBLISH_PR" ]; then
-          ARGS+=("--publish-pr" "$INPUT_PUBLISH_PR")
-        fi
-
-        if [ -n "$INPUT_APP_CMD" ]; then
-          ARGS+=("--app-cmd" "$INPUT_APP_CMD")
-        fi
-
-        if [ "$INPUT_FAIL_ON_EXPLOIT" = "true" ]; then
-          ARGS+=("--fail-on-exploit")
-        fi
-
-        if [ -n "$INPUT_JWT_SECRET" ]; then
-          ARGS+=("--jwt-secret" "$INPUT_JWT_SECRET")
-        fi
-
-        prometheus-scan "${ARGS[@]}"
-        EXIT_CODE=$?
-
-        echo "markdown_path=prometheus-pr-report.md" >> $GITHUB_OUTPUT
-        if [ ! -f prometheus-pr-report.md ]; then
-          touch prometheus-pr-report.md
-        fi
-        if ! grep -q "exploits_count=" "$GITHUB_OUTPUT" 2>/dev/null; then
-          echo "exploits_count=0" >> "$GITHUB_OUTPUT"
-        fi
-        if ! grep -q "patches_count=" "$GITHUB_OUTPUT" 2>/dev/null; then
-          echo "patches_count=0" >> "$GITHUB_OUTPUT"
-        fi
-        exit $EXIT_CODE
-
-    - name: Post PR Comment with Reproduction PoC and Patch
-      if: always() && github.event_name == 'pull_request' && inputs.github-token != ''
-      uses: actions/github-script@v7
-      with:
-        github-token: ${{ inputs.github-token }}
-        script: |
-          const fs = require('fs');
-          if (fs.existsSync('prometheus-pr-report.md')) {
-            const report = fs.readFileSync('prometheus-pr-report.md', 'utf8');
-            if (report.trim().length > 0) {
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: report
-              });
-            }
-          }

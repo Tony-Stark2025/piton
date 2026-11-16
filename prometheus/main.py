@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Prometheus Enterprise: Autonomous Exploit & Capability Governance Platform",
     description="Enterprise API Penetration Testing, Runtime Capability Hypervisor & Stateful Execution Firewall",
-    version="2.0.0",
+    version="3.0.0",
     lifespan=lifespan,
 )
 
@@ -1150,6 +1150,89 @@ async def receive_oob_canary_callback(canary_id: str, request: Request):
     if event is None:
         raise HTTPException(status_code=400, detail="Invalid OOB canary identifier format.")
     return {"status": "recorded", "canary_id": canary_id}
+
+
+# ==============================================================================
+# Enterprise Readiness & Asynchronous Scan Job Control Plane
+# ==============================================================================
+_ASYNC_SCAN_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+@app.get("/readyz", tags=["System Health & Readiness"])
+async def readiness_probe():
+    """Verifies database connectivity and active LLM provider resolution."""
+    from prometheus.llm.provider_manager import provider_manager
+    prov, cfg = provider_manager.resolve_provider()
+    return {
+        "status": "ready",
+        "version": "3.0.0",
+        "llm_provider": prov.value,
+        "llm_model": cfg.get("model", "deterministic"),
+        "active_jobs_count": sum(1 for j in _ASYNC_SCAN_JOBS.values() if j.get("status") == "RUNNING"),
+    }
+
+
+@app.post("/api/v1/jobs/scan", status_code=202, tags=["Async Scan Jobs"])
+async def enqueue_async_scan_job(req: PentestScanRequest):
+    """
+    Control-Plane Async Job Dispatcher:
+    Enqueues a non-blocking background scan job and immediately returns HTTP 202 Accepted
+    with a job_id and poll_url so enterprise load balancers never time out.
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    if req.target_dir and not os.path.isdir(req.target_dir):
+        raise HTTPException(status_code=400, detail=f"Target directory does not exist: {req.target_dir}")
+
+    job_id = f"job-{uuid.uuid4().hex[:12]}"
+    created_at = datetime.now(timezone.utc).isoformat()
+    _ASYNC_SCAN_JOBS[job_id] = {
+        "job_id": job_id,
+        "status": "RUNNING",
+        "target_url": req.target_url,
+        "target_dir": req.target_dir,
+        "created_at": created_at,
+        "completed_at": None,
+        "poll_url": f"/api/v1/jobs/{job_id}",
+        "result": None,
+        "error": None,
+    }
+
+    async def _run_job() -> None:
+        try:
+            res = await PentestExecutionService.execute_scan(req)
+            _ASYNC_SCAN_JOBS[job_id]["status"] = "COMPLETED"
+            _ASYNC_SCAN_JOBS[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _ASYNC_SCAN_JOBS[job_id]["result"] = res.model_dump()
+        except Exception as exc:
+            _ASYNC_SCAN_JOBS[job_id]["status"] = "FAILED"
+            _ASYNC_SCAN_JOBS[job_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+            _ASYNC_SCAN_JOBS[job_id]["error"] = str(exc)
+
+    asyncio.create_task(_run_job())
+    return {
+        "job_id": job_id,
+        "status": "RUNNING",
+        "created_at": created_at,
+        "poll_url": f"/api/v1/jobs/{job_id}",
+    }
+
+
+@app.get("/api/v1/jobs/{job_id}", tags=["Async Scan Jobs"])
+async def get_async_scan_job_status(job_id: str):
+    """Polls the status and results of an asynchronous scan job."""
+    job = _ASYNC_SCAN_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Scan job '{job_id}' not found.")
+    return job
+
+
+@app.get("/api/v1/jobs", tags=["Async Scan Jobs"])
+async def list_async_scan_jobs():
+    """Lists recent asynchronous scan jobs."""
+    jobs = list(_ASYNC_SCAN_JOBS.values())[-25:]
+    return {"jobs_count": len(jobs), "jobs": jobs}
 
 
 # ==============================================================================

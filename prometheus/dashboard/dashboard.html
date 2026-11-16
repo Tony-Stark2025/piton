@@ -937,7 +937,7 @@
     </section>
 
     <!-- ======================================================================= -->
-    <!-- TAB: CONTINUOUS IMMUNOLOGY, CONTEXTUAL SWE REPAIR & OOB ORACLE (v2.5)   -->
+    <!-- TAB: CONTINUOUS IMMUNOLOGY, CONTEXTUAL SWE REPAIR & OOB ORACLE (v3.0)   -->
     <!-- ======================================================================= -->
     <section id="section-immunology" class="hidden space-y-6">
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -948,9 +948,9 @@
               <i data-lucide="radar" class="w-4 h-4 text-cyan-400"></i>
               <span>Event-Driven Continuous Immunology</span>
             </h3>
-            <span class="px-2 py-0.5 text-[10px] font-mono bg-cyan-950/50 text-cyan-400 border border-cyan-500/30 rounded">THN + OSV.dev + AST</span>
+            <span class="px-2 py-0.5 text-[10px] font-mono bg-cyan-950/50 text-cyan-400 border border-cyan-500/30 rounded">THN + OSV.dev + AST + Supply-Chain</span>
           </div>
-          <p class="text-xs text-slate-400">Ingests live advisories from The Hacker News RSS &amp; OSV.dev, parses repository lockfiles, and traces AST call-graph reachability.</p>
+          <p class="text-xs text-slate-400">Ingests live advisories from The Hacker News RSS &amp; OSV.dev, traces AST call-graph reachability to exposed API routes, and scans for GitSpawn / Plugin4Shell / Package-Firewall threats.</p>
           <div class="space-y-2">
             <label class="text-[11px] font-semibold text-slate-300 block">Target Repository Path</label>
             <input type="text" id="imm-target-dir" value="." class="w-full px-3 py-2 rounded-lg glass-input text-xs font-mono">
@@ -959,6 +959,7 @@
             <i data-lucide="activity" class="w-4 h-4"></i>
             <span>Execute Continuous Immunology Sweep</span>
           </button>
+          <div id="imm-summary-cards" class="hidden space-y-2"></div>
           <pre id="imm-result-box" class="p-3 rounded-xl bg-[#07090e] border border-[#1c2333] text-[11px] font-mono text-slate-300 max-h-72 overflow-y-auto">Click "Execute Continuous Immunology Sweep" to query live OSV.dev &amp; THN feeds and trace AST reachability.</pre>
         </div>
 
@@ -1302,7 +1303,8 @@
     async function runImmunologySweepUI() {
       const targetDir = document.getElementById('imm-target-dir').value.trim() || '.';
       const box = document.getElementById('imm-result-box');
-      box.textContent = 'Running Continuous Immunology sweep (THN RSS + OSV.dev + Lockfile & AST Call-Graph)...';
+      const cards = document.getElementById('imm-summary-cards');
+      box.textContent = 'Running Continuous Immunology sweep (THN RSS + OSV.dev + Lockfile & AST Call-Graph + Supply-Chain)...';
       try {
         const res = await fetch('/api/v1/immunology/scan', {
           method: 'POST',
@@ -1310,6 +1312,39 @@
           body: JSON.stringify({ target_dir: targetDir })
         });
         const data = await res.json();
+        if (!res.ok) {
+          box.textContent = `Error (${res.status}): ${data.detail || JSON.stringify(data)}`;
+          showToast(data.detail || 'Immunology sweep failed', 'error');
+          return;
+        }
+        if (cards) {
+          const scList = data.agentic_supply_chain_findings || [];
+          const expRoutes = data.exposed_routes || [];
+          cards.classList.remove('hidden');
+          cards.innerHTML = `
+            <div class="grid grid-cols-2 gap-2 text-[11px] font-mono">
+              <div class="p-2 rounded-lg bg-[#0b0f17] border border-[#1c2333]">
+                <span class="text-slate-400 block">Reachable / Suppressed</span>
+                <span class="text-cyan-400 font-bold">${data.reachable_vulnerabilities_count || 0} reachable</span>
+                <span class="text-emerald-400"> • ${data.suppressed_unreachable_noise_count || 0} noise filtered</span>
+              </div>
+              <div class="p-2 rounded-lg bg-[#0b0f17] border border-[#1c2333]">
+                <span class="text-slate-400 block">Agentic Supply-Chain</span>
+                <span class="${scList.length > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}">${scList.length} alerts (GitSpawn/MCP)</span>
+              </div>
+            </div>
+            ${expRoutes.length > 0 ? `
+              <div class="p-2 rounded-lg bg-amber-950/30 border border-amber-500/30 text-[11px] font-mono text-amber-300">
+                <span class="font-bold">Exposed API Routes (${expRoutes.length}):</span> ${expRoutes.slice(0, 5).map(escapeHtml).join(', ')}
+              </div>
+            ` : ''}
+            ${scList.map(sc => `
+              <div class="p-2 rounded-lg bg-rose-950/40 border border-rose-500/40 text-[11px] font-mono text-rose-200">
+                <span class="font-bold">[${escapeHtml(sc.severity)}] ${escapeHtml(sc.category)}</span> in <code>${escapeHtml(sc.file)}</code>: ${escapeHtml(sc.matched_directive)}
+              </div>
+            `).join('')}
+          `;
+        }
         box.textContent = JSON.stringify(data, null, 2);
         showToast(`✓ Immunology Sweep: ${data.dependencies_scanned || 0} deps, ${data.reachable_vulnerabilities_count || 0} reachable CVEs`);
       } catch (err) {
@@ -1355,7 +1390,7 @@
       const box = document.getElementById('swe-result-box');
       const cpr = lastSynthesizedPR?.contextual_pr || {};
       const patchDiff = lastSynthesizedPR?.patch?.git_diff || '';
-      const patchedCode = lastSynthesizedPR?.patched_code || lastSynthesizedPR?.contextual_pr?.patched_code || patchDiff || '# Patched by Prometheus v2.5\n';
+      const patchedCode = lastSynthesizedPR?.patched_code || lastSynthesizedPR?.contextual_pr?.patched_code || patchDiff || '# Patched by Prometheus v3.0\n';
       try {
         const res = await fetch('/api/v1/pentest/publish-pr', {
           method: 'POST',
@@ -1668,7 +1703,7 @@
       }, 250);
 
       try {
-        const res = await fetch('/api/v1/pentest/scan', {
+        const enqueueRes = await fetch('/api/v1/jobs/scan', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -1678,25 +1713,44 @@
           })
         });
 
+        let scanData = null;
+        if (enqueueRes.status === 202) {
+          const jobMeta = await enqueueRes.json();
+          const pollUrl = jobMeta.poll_url || `/api/v1/jobs/${jobMeta.job_id}`;
+          while (((Date.now() - startTime) / 1000) < 85.0) {
+            await new Promise(r => setTimeout(r, 600));
+            const pollRes = await fetch(pollUrl);
+            if (!pollRes.ok) break;
+            const jobState = await pollRes.json();
+            if (jobState.status === 'COMPLETED' && jobState.result) {
+              scanData = jobState.result;
+              break;
+            } else if (jobState.status === 'FAILED') {
+              throw new Error(jobState.error || 'Async scan job failed');
+            }
+          }
+        } else if (enqueueRes.ok) {
+          scanData = await enqueueRes.json();
+        } else {
+          const errData = await enqueueRes.json().catch(() => ({ detail: 'Scan execution failed' }));
+          throw new Error(errData.detail || 'Target unreachable');
+        }
+
         clearInterval(interval);
         const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(2);
         if (timerText) timerText.innerText = `${elapsedSec}s / 85.0s SLA`;
         if (progressBar) progressBar.style.width = '100%';
 
-        if (res.ok) {
-          const scanData = await res.json();
-          if (statusText) statusText.innerText = `✓ Scan completed in ${scanData.elapsed_seconds}s with 0% false positives!`;
+        if (scanData) {
+          const triageCount = (scanData.triage_findings || []).length;
+          if (statusText) statusText.innerText = `✓ Scan completed in ${scanData.elapsed_seconds}s (${scanData.exploits_count} Tier-A PoVs, ${triageCount} Tier-B Triage)!`;
           renderPentestFindings(scanData);
-          showToast(`✓ Pentest gate finished in ${scanData.elapsed_seconds}s! Discovered ${scanData.exploits_count} exploits.`);
-        } else {
-          const errData = await res.json().catch(() => ({ detail: 'Scan execution failed' }));
-          if (statusText) statusText.innerText = `Scan error: ${errData.detail || 'Target unreachable'}`;
-          showToast(`Scan failed: ${errData.detail || 'Target unreachable'}`, 'error');
+          showToast(`✓ Pentest gate finished in ${scanData.elapsed_seconds}s! ${scanData.exploits_count} Tier-A PoVs, ${triageCount} Tier-B Triage.`);
         }
       } catch (err) {
         clearInterval(interval);
-        if (statusText) statusText.innerText = `Network or target error: ${err.message}`;
-        showToast(`Scan network error: ${err.message}`, 'error');
+        if (statusText) statusText.innerText = `Scan error: ${err.message}`;
+        showToast(`Scan failed: ${err.message}`, 'error');
       } finally {
         if (btn) {
           btn.disabled = false;
@@ -1711,11 +1765,13 @@
       const exploitsCount = document.getElementById('stat-exploits-count');
       const patchesCount = document.getElementById('stat-patches-count');
       const exploitsBadge = document.getElementById('stat-exploits-badge');
+      const confirmed = scanData.confirmed_exploits || [];
+      const triageList = scanData.triage_findings || [];
 
       if (exploitsCount) exploitsCount.innerText = scanData.exploits_count;
       if (patchesCount) patchesCount.innerText = scanData.patches_count;
 
-      if (!scanData.confirmed_exploits || scanData.confirmed_exploits.length === 0) {
+      if (confirmed.length === 0 && triageList.length === 0) {
         if (exploitsBadge) {
           exploitsBadge.innerText = '0 Exploits Found';
           exploitsBadge.className = 'text-xs font-semibold text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded-md border border-emerald-500/30';
@@ -1725,8 +1781,8 @@
             <div class="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-400 mx-auto flex items-center justify-center">
               <i data-lucide="shield-check" class="w-5 h-5"></i>
             </div>
-            <h4 class="text-sm font-bold text-white">All Clear — Zero Vulnerabilities Confirmed</h4>
-            <p class="text-xs text-slate-400">All ${scanData.endpoints_count} endpoints verified fail-closed against BOLA and BFLA adversarial turns.</p>
+            <h4 class="text-sm font-bold text-white">All Clear — Zero Vulnerabilities or Semantic Sinks</h4>
+            <p class="text-xs text-slate-400">All ${scanData.endpoints_count} endpoints verified fail-closed across Tier-A PoV and Tier-B Semantic Triage gates.</p>
           </div>
         `;
         lucide.createIcons();
@@ -1734,8 +1790,10 @@
       }
 
       if (exploitsBadge) {
-        exploitsBadge.innerText = `${scanData.confirmed_exploits.length} Confirmed Exploits`;
-        exploitsBadge.className = 'text-xs font-semibold text-rose-400 bg-rose-950/40 px-2 py-0.5 rounded-md border border-rose-500/30';
+        exploitsBadge.innerText = `${confirmed.length} Tier-A PoVs • ${triageList.length} Tier-B Triage`;
+        exploitsBadge.className = confirmed.length > 0
+          ? 'text-xs font-semibold text-rose-400 bg-rose-950/40 px-2 py-0.5 rounded-md border border-rose-500/30'
+          : 'text-xs font-semibold text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30';
       }
 
       container.innerHTML = `
@@ -1743,7 +1801,7 @@
           <div class="flex items-center justify-between">
             <h4 class="text-xs font-bold text-rose-300 uppercase tracking-wider flex items-center space-x-2">
               <i data-lucide="flame" class="w-4 h-4 text-rose-500"></i>
-              <span>Confirmed Vulnerabilities (${scanData.confirmed_exploits.length})</span>
+              <span>Tier-A Verified PoVs (${confirmed.length}) &amp; Tier-B Semantic Triage (${triageList.length})</span>
             </h4>
             <span class="text-[11px] font-mono text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-500/30">
               ${scanData.patches_count} CEGIS Auto-Patches Verified
@@ -1751,7 +1809,7 @@
           </div>
 
           <div class="space-y-3">
-            ${scanData.confirmed_exploits.map((exp, idx) => {
+            ${confirmed.map((exp, idx) => {
               const testKey = `${exp.http_method}_${exp.target_endpoint.replace(/\//g, '_')}`;
               const regTest = scanData.regression_tests ? scanData.regression_tests[testKey] : null;
               const patch = scanData.certified_patches && scanData.certified_patches[idx] ? scanData.certified_patches[idx] : null;
@@ -1759,12 +1817,14 @@
               const proofText = exp.reflection_proof || exp.remediation_guidance || 'Verified exploit proof';
               const curlText = exp.curl_poc || exp.curl_command || '';
               const diffText = patch ? (patch.patch_diff || patch.git_diff || '') : '';
+              const dispBadge = exp.disposition || 'TIER_A_VERIFIED_POV';
 
               return `
                 <div class="p-4 rounded-xl bg-[#0f141f] border border-rose-900/50 space-y-3">
                   <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div class="flex items-center space-x-2">
                       <span class="px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase bg-rose-950 text-rose-300 border border-rose-700/60">${escapeHtml(exp.severity)}</span>
+                      <span class="px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase bg-emerald-950 text-emerald-300 border border-emerald-700/60">${escapeHtml(dispBadge)}</span>
                       <span class="px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase bg-indigo-950 text-indigo-300 border border-indigo-700/60">${escapeHtml(vectorText)}</span>
                       <span class="font-mono text-xs font-bold text-white">${escapeHtml(exp.http_method)} ${escapeHtml(exp.target_endpoint)}</span>
                     </div>
@@ -1805,6 +1865,23 @@
                 </div>
               `;
             }).join('')}
+
+            ${triageList.map((tf, tIdx) => `
+              <div class="p-4 rounded-xl bg-[#0f141f] border border-amber-700/50 space-y-2">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div class="flex items-center space-x-2">
+                    <span class="px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase bg-amber-950 text-amber-300 border border-amber-700/60">${escapeHtml(tf.severity || 'MEDIUM')}</span>
+                    <span class="px-2 py-0.5 rounded font-mono text-[10px] font-bold uppercase bg-amber-950/60 text-amber-200 border border-amber-500/40">TIER_B_SEMANTIC_TRIAGE</span>
+                    <span class="font-mono text-xs font-bold text-white">${escapeHtml(tf.http_method)} ${escapeHtml(tf.target_endpoint)}</span>
+                  </div>
+                  <span class="text-[10px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-500/30">
+                    Glass-Box Sink Triage Queue
+                  </span>
+                </div>
+                <p class="text-xs text-amber-200/90">${escapeHtml(tf.triage_reason || 'Semantic sink requires human AppSec review.')}</p>
+                <p class="text-[11px] text-slate-400"><strong>Remediation:</strong> ${escapeHtml(tf.remediation_guidance || '')}</p>
+              </div>
+            `).join('')}
           </div>
         </div>
       `;

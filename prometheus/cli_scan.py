@@ -224,6 +224,7 @@ async def _run_scan_internal(
     elapsed_time = time.perf_counter() - start_total_time
 
     confirmed_exploits: List[ExploitProof] = engine_results.get("vulnerabilities", [])
+    triage_findings: List[ExploitProof] = engine_results.get("triage_findings", [])
     synthesized_patches: List[AutoPatchResult] = engine_results.get("patches", [])
     cumulative_diff: str = engine_results.get("cumulative_diff", "")
     patched_files: Dict[str, str] = engine_results.get("patched_files", {})
@@ -242,7 +243,8 @@ async def _run_scan_internal(
     print("=" * 80)
     print(f"  Total Scan Time:        {elapsed_time:.2f} seconds (< 90s SLA Gate)")
     print(f"  Endpoints Probed:       {len(endpoints)}")
-    print(f"  Confirmed Exploits:     {len(confirmed_exploits)} (0% False Positives)")
+    print(f"  Confirmed Exploits:     {len(confirmed_exploits)} (Tier-A Verified PoVs, 0% False Positives)")
+    print(f"  Semantic Triage Queue:  {len(triage_findings)} (Tier-B Glass-Box Sink Warnings)")
     print(f"  Certified Auto-Patches: {len(synthesized_patches)}")
     print("=" * 80)
 
@@ -385,6 +387,15 @@ async def _run_scan_internal(
             except Exception:
                 pass
 
+    if triage_findings:
+        print("\n" + "-" * 80)
+        print("  [~] TIER-B SEMANTIC TRIAGE QUEUE (Glass-Box Sinks Requiring AppSec Review)")
+        print("-" * 80)
+        for t_idx, tf in enumerate(triage_findings, 1):
+            print(f"  [{t_idx}] {tf.severity.value} — {tf.vector.value} on {tf.http_method.value} {tf.target_endpoint}")
+            print(f"      Reason:      {tf.triage_reason or 'Glass-box semantic sink detected'}")
+            print(f"      Remediation: {tf.remediation_guidance}")
+
     await prober.aclose()
 
     if publish_pr_repo and patched_files:
@@ -510,18 +521,29 @@ def main() -> None:
                 repo=args.publish_pr,
             )
         )
+        sc_findings = res.get("agentic_supply_chain_findings", [])
+        exposed_routes = res.get("exposed_routes", [])
         print(f"[+] Dependencies Scanned:          {res['dependencies_scanned']}")
         print(f"[+] THN Live Advisories Ingested:  {res['thn_live_events_ingested']}")
         print(f"[+] OSV Advisories Matched:        {res['osv_advisories_matched']}")
         print(f"[+] Reachable Vulnerabilities:     {res['reachable_vulnerabilities_count']}")
         print(f"[+] Unreachable Noise Suppressed:  {res['suppressed_unreachable_noise_count']}")
+        print(f"[+] Network-Exposed API Routes:    {len(exposed_routes)} ({', '.join(exposed_routes[:5]) or 'none'})")
+        print(f"[+] Agentic Supply-Chain Alerts:   {len(sc_findings)} (GitSpawn / Plugin4Shell / Package Firewall)")
+        for sc in sc_findings:
+            print(f"\n  [!] AGENTIC SUPPLY-CHAIN ALERT [{sc['severity']}]: {sc['category']} in {sc['file']}")
+            print(f"      Directive:   {sc['matched_directive']}")
+            print(f"      Remediation: {sc['remediation']}")
         for plan in res.get("remediation_plans", []):
             print(f"\n  [!] REACHABLE CVE: {plan['advisory_id']} in {plan['package_name']}@{plan['current_version']}")
+            if plan.get("exposed_routes"):
+                print(f"      Exposed Routes: {', '.join(plan['exposed_routes'][:5])}")
             print(f"      Action: {plan['recommended_action']}")
             if plan.get("github_pr_result"):
                 pr_info = plan["github_pr_result"]
                 print(f"      GitHub PR Status: {pr_info.get('status')} {pr_info.get('pr_url', '')}")
-        sys.exit(1 if (res["reachable_vulnerabilities_count"] > 0 and args.fail_on_exploit) else 0)
+        should_fail = (res["reachable_vulnerabilities_count"] > 0 or len(sc_findings) > 0) and args.fail_on_exploit
+        sys.exit(1 if should_fail else 0)
 
     seed_params: Dict[str, str] = {}
     sensitive_markers: List[str] = []
