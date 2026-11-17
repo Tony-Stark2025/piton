@@ -118,6 +118,7 @@ DOCUMENTATION_PATH = os.path.join(os.path.dirname(__file__), "dashboard", "docum
 
 @app.get("/", response_class=HTMLResponse, tags=["Dashboard"])
 @app.get("/dashboard", response_class=HTMLResponse, tags=["Dashboard"])
+@app.get("/dashboard/", response_class=HTMLResponse, include_in_schema=False)
 async def serve_dashboard():
     """
     Renders the Prometheus Security & Capability Hypervisor Web Dashboard.
@@ -825,14 +826,19 @@ async def delete_integration(service: str, user: AuthUserContext = Depends(get_c
 @app.get("/health", tags=["System"])
 @app.get("/api/v1/health", tags=["System"])
 async def health_check():
+    from prometheus.llm.provider_manager import provider_manager
+    prov, cfg = provider_manager.resolve_provider()
+    env_name = "production" if os.getenv("K_SERVICE") else settings.environment
     return {
         "status": "healthy",
+        "version": "3.0.0",
         "service": "prometheus-security-engine",
         "platform_service": "prometheus-enterprise-security-and-governance",
         "app": settings.app_name,
-        "environment": settings.environment,
+        "environment": env_name,
         "platform": "Gemini Enterprise Agent Platform (Agent Engine)",
-        "model": settings.gemini_model,
+        "llm_provider": prov.value,
+        "model": cfg.get("model", "deterministic"),
         "location": settings.gcp_location,
         "agent_engine": {
             "app_id": settings.agent_engine_app_id,
@@ -1098,10 +1104,18 @@ async def mint_oob_canary_endpoint(req: MintOOBCanaryRequest, request: Request):
     """
     from prometheus.pentest.oob_listener import oob_canary_registry
 
-    base_url = str(request.base_url).rstrip("/")
-    forwarded_proto = request.headers.get("x-forwarded-proto") or request.headers.get("X-Forwarded-Proto")
-    if forwarded_proto:
-        base_url = re.sub(r"^https?://", f"{forwarded_proto}://", base_url)
+    public_base = os.getenv("PROMETHEUS_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if public_base:
+        base_url = public_base
+    else:
+        base_url = str(request.base_url).rstrip("/")
+        forwarded_proto = request.headers.get("x-forwarded-proto") or request.headers.get("X-Forwarded-Proto")
+        forwarded_host = request.headers.get("x-forwarded-host") or request.headers.get("X-Forwarded-Host")
+        if forwarded_host:
+            scheme = forwarded_proto or "https"
+            base_url = f"{scheme}://{forwarded_host.split(',')[0].strip()}"
+        elif forwarded_proto:
+            base_url = re.sub(r"^https?://", f"{forwarded_proto}://", base_url)
     reg = oob_canary_registry.mint_canary(
         target_endpoint=req.target_endpoint,
         vector=req.vector,
@@ -1173,7 +1187,7 @@ async def readiness_probe():
 
 
 @app.post("/api/v1/jobs/scan", status_code=202, tags=["Async Scan Jobs"])
-async def enqueue_async_scan_job(req: PentestScanRequest):
+async def enqueue_async_scan_job(req: PentestScanRequest, request: Request):
     """
     Control-Plane Async Job Dispatcher:
     Enqueues a non-blocking background scan job and immediately returns HTTP 202 Accepted
@@ -1185,10 +1199,17 @@ async def enqueue_async_scan_job(req: PentestScanRequest):
     if req.target_dir and not os.path.isdir(req.target_dir):
         raise HTTPException(status_code=400, detail=f"Target directory does not exist: {req.target_dir}")
 
+    owner_tenant = (
+        request.headers.get("x-tenant-id")
+        or request.headers.get("X-Tenant-ID")
+        or req.alpha_tenant_id
+        or "default_enterprise"
+    )
     job_id = f"job-{uuid.uuid4().hex[:12]}"
     created_at = datetime.now(timezone.utc).isoformat()
     _ASYNC_SCAN_JOBS[job_id] = {
         "job_id": job_id,
+        "tenant_id": owner_tenant,
         "status": "RUNNING",
         "target_url": req.target_url,
         "target_dir": req.target_dir,
@@ -1220,11 +1241,14 @@ async def enqueue_async_scan_job(req: PentestScanRequest):
 
 
 @app.get("/api/v1/jobs/{job_id}", tags=["Async Scan Jobs"])
-async def get_async_scan_job_status(job_id: str):
-    """Polls the status and results of an asynchronous scan job."""
+async def get_async_scan_job_status(job_id: str, request: Request):
+    """Polls the status and results of an asynchronous scan job with tenant isolation."""
     job = _ASYNC_SCAN_JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Scan job '{job_id}' not found.")
+    req_tenant = request.headers.get("x-tenant-id") or request.headers.get("X-Tenant-ID")
+    if req_tenant and req_tenant != job.get("tenant_id"):
+        raise HTTPException(status_code=403, detail="Forbidden: Tenant does not own this scan job.")
     return job
 
 

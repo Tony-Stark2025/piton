@@ -94,8 +94,26 @@ To protect APIs from autonomous tool and agent abuse at runtime, Prometheus prov
   pip install -e .
   ```
 
+### 1-Command Self-Contained Demo (Zero Setup)
+Run Prometheus against its built-in multi-tenant benchmark service (`BOLA` + `BFLA` + CEGIS compiled AST verification):
+```bash
+python -m prometheus.cli_scan --demo
+```
+
+### Drop-In GitHub Action (`@v3`)
+Add Prometheus as an automated Pull Request Security Gate in `.github/workflows/prometheus.yml`:
+```yaml
+- name: Prometheus Autonomous AppSec Gate
+  uses: Tony-Stark2025/prometheus-enterprise@v3
+  with:
+    mode: "pentest"          # or "immunology"
+    app-cmd: "uvicorn app.main:app --port 8000"
+    target-url: "http://127.0.0.1:8000"
+    fail-on-exploit: "true"
+```
+
 ### Run CI/CD Vulnerability Scan & Publish Remediation PR
-Execute an autonomous vulnerability assessment against a live OpenAPI endpoint and automatically open a compiler-verified GitHub Pull Request:
+Execute an autonomous vulnerability assessment against a live OpenAPI endpoint (or pass `--app-cmd` to boot it automatically) and open a compiler-verified GitHub Pull Request:
 ```bash
 python -m prometheus.cli_scan \
   --target-url http://localhost:8000 \
@@ -106,8 +124,8 @@ python -m prometheus.cli_scan \
   --output-sarif prometheus-report.sarif
 ```
 
-### Run Event-Driven Continuous Immunology Sweep
-Ingest live advisories from The Hacker News (THN) RSS and OSV.dev, parse repository lockfiles (`requirements.txt`, `pyproject.toml`, `poetry.lock`, `package.json`, `package-lock.json`), trace AST call-graph reachability, and synthesize manifest upgrade PRs:
+### Run Event-Driven Continuous Immunology & Coding-Agent Supply-Chain Sweep
+Ingest live advisories from The Hacker News (THN) RSS and OSV.dev, parse repository lockfiles (`requirements.txt`, `pyproject.toml`, `poetry.lock`, `package.json`, `package-lock.json`), trace AST call-graph reachability to exposed routes, and detect *GitSpawn* / *Plugin4Shell* / *Package-Firewall* threats:
 ```bash
 python -m prometheus.cli_scan --immunology --target-dir . --publish-pr owner/repo
 ```
