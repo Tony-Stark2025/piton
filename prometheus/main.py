@@ -996,6 +996,7 @@ async def execute_immunology_scan(req: ImmunologyScanRequest):
     import io
     import tarfile
     import tempfile
+    import httpx
     from prometheus.pentest.immunology import ContinuousImmunologyEngine
 
     raw_target = (req.target_dir or req.repo or ".").strip()
