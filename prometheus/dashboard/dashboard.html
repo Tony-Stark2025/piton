@@ -952,8 +952,8 @@
           </div>
           <p class="text-xs text-slate-400">Ingests live advisories from The Hacker News RSS &amp; OSV.dev, traces AST call-graph reachability to exposed API routes, and scans for GitSpawn / Plugin4Shell / Package-Firewall threats.</p>
           <div class="space-y-2">
-            <label class="text-[11px] font-semibold text-slate-300 block">Target Repository Path</label>
-            <input type="text" id="imm-target-dir" value="." class="w-full px-3 py-2 rounded-lg glass-input text-xs font-mono">
+            <label class="text-[11px] font-semibold text-slate-300 block">Public GitHub Repo URL or Local Path</label>
+            <input type="text" id="imm-target-dir" value="https://github.com/Tony-Stark2025/outreach-app" placeholder="https://github.com/owner/repo" class="w-full px-3 py-2 rounded-lg glass-input text-xs font-mono">
           </div>
           <button id="btn-run-immunology" onclick="runImmunologySweepUI()" class="w-full py-2.5 bg-cyan-600 hover:bg-cyan-500 text-white font-semibold rounded-xl text-xs transition flex items-center justify-center space-x-2">
             <i data-lucide="activity" class="w-4 h-4"></i>
@@ -1320,27 +1320,35 @@
         if (cards) {
           const scList = data.agentic_supply_chain_findings || [];
           const expRoutes = data.exposed_routes || [];
+          const cov = data.coverage_telemetry || {};
+          const sinks = data.tier_b_semantic_sinks || [];
           cards.classList.remove('hidden');
           cards.innerHTML = `
             <div class="grid grid-cols-2 gap-2 text-[11px] font-mono">
               <div class="p-2 rounded-lg bg-[#0b0f17] border border-[#1c2333]">
-                <span class="text-slate-400 block">Reachable / Suppressed</span>
-                <span class="text-cyan-400 font-bold">${data.reachable_vulnerabilities_count || 0} reachable</span>
-                <span class="text-emerald-400"> • ${data.suppressed_unreachable_noise_count || 0} noise filtered</span>
+                <span class="text-slate-400 block">Coverage &amp; Noise Filter</span>
+                <span class="text-cyan-400 font-bold">${cov.files_scanned || 0} files • ${data.dependencies_scanned || 0} deps</span>
+                <span class="text-emerald-400 block">${data.reachable_vulnerabilities_count || 0} reachable • ${data.suppressed_unreachable_noise_count || 0} filtered</span>
               </div>
               <div class="p-2 rounded-lg bg-[#0b0f17] border border-[#1c2333]">
-                <span class="text-slate-400 block">Agentic Supply-Chain</span>
-                <span class="${scList.length > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}">${scList.length} alerts (GitSpawn/MCP)</span>
+                <span class="text-slate-400 block">Supply-Chain &amp; Tier-B Sinks</span>
+                <span class="${scList.length > 0 ? 'text-rose-400 font-bold' : 'text-emerald-400 font-bold'}">${scList.length} GitSpawn/MCP</span>
+                <span class="text-amber-400 block">${sinks.length} Tier-B Sinks</span>
               </div>
             </div>
             ${expRoutes.length > 0 ? `
               <div class="p-2 rounded-lg bg-amber-950/30 border border-amber-500/30 text-[11px] font-mono text-amber-300">
-                <span class="font-bold">Exposed API Routes (${expRoutes.length}):</span> ${expRoutes.slice(0, 5).map(escapeHtml).join(', ')}
+                <span class="font-bold">Exposed API Routes (${expRoutes.length}):</span> ${expRoutes.slice(0, 6).map(escapeHtml).join(', ')}
               </div>
             ` : ''}
             ${scList.map(sc => `
               <div class="p-2 rounded-lg bg-rose-950/40 border border-rose-500/40 text-[11px] font-mono text-rose-200">
                 <span class="font-bold">[${escapeHtml(sc.severity)}] ${escapeHtml(sc.category)}</span> in <code>${escapeHtml(sc.file)}</code>: ${escapeHtml(sc.matched_directive)}
+              </div>
+            `).join('')}
+            ${sinks.slice(0, 4).map(sk => `
+              <div class="p-2 rounded-lg bg-amber-950/40 border border-amber-500/40 text-[11px] font-mono text-amber-200">
+                <span class="font-bold">[TIER-B] ${escapeHtml(sk.category)}</span> in <code>${escapeHtml(sk.file)}</code>: ${escapeHtml(sk.reason)}
               </div>
             `).join('')}
           `;

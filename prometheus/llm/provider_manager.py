@@ -249,6 +249,25 @@ class ProviderManager:
         except Exception:
             pass
 
+        # 1b. Cloud Run / GCE Metadata Server token (<2ms inside Cloud Run container)
+        if os.getenv("K_SERVICE"):
+            try:
+                resp = httpx.get(
+                    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+                    headers={"Metadata-Flavor": "Google"},
+                    timeout=1.5,
+                )
+                if resp.status_code == 200:
+                    tok_data = resp.json()
+                    tok = str(tok_data.get("access_token", "")).strip()
+                    expires_in = float(tok_data.get("expires_in", 1800.0))
+                    if tok:
+                        cls._cached_gcloud_token = tok
+                        cls._gcloud_token_expiry = now + max(expires_in - 60.0, 300.0)
+                        return tok
+            except Exception as exc:
+                logger.debug(f"Cloud Run metadata token fetch skipped: {exc}")
+
         # 2. Fast refresh via gcloud CLI (bounded at 3.5s per attempt, cached on failure)
         try:
             import shutil

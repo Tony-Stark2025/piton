@@ -987,17 +987,67 @@ class SWEPatchRequest(BaseModel):
 @app.post("/api/v1/immunology/scan")
 async def execute_immunology_scan(req: ImmunologyScanRequest):
     """
-    Prometheus v2.5 Event-Driven Continuous Immunology Endpoint.
-    Ingests live advisories from The Hacker News (THN) RSS and OSV.dev APIs,
-    extracts repository dependencies, verifies source-code reachability,
-    synthesizes manifest upgrade diffs, and optionally publishes a GitHub PR.
+    Prometheus v3.0 Event-Driven Continuous Immunology & Public GitHub Repo Scanner.
+    Accepts either a local directory path OR any public GitHub repository URL
+    (e.g., 'https://github.com/owner/repo' or 'owner/repo'), fetches an isolated snapshot,
+    ingests THN + OSV.dev advisories, traces AST call-graph reachability to exposed routes,
+    and detects GitSpawn / Plugin4Shell / Package-Firewall + Tier-B semantic sinks.
     """
+    import io
+    import tarfile
+    import tempfile
     from prometheus.pentest.immunology import ContinuousImmunologyEngine
+
+    raw_target = (req.target_dir or req.repo or ".").strip()
+    gh_match = re.match(
+        r"^(?:https?://github\.com/)?([A-Za-z0-9_.\-]+)/([A-Za-z0-9_.\-]+?)(?:\.git|/.*)?$",
+        raw_target,
+    )
+
+    # 1. If target is a GitHub repository URL or owner/repo (and not an existing local path)
+    if gh_match and not os.path.isdir(raw_target) and not raw_target.startswith("/"):
+        owner, repo_name = gh_match.group(1), gh_match.group(2)
+        tarball_url = f"https://codeload.github.com/{owner}/{repo_name}/tar.gz/HEAD"
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=18.0) as client:
+                resp = await client.get(tarball_url)
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Could not fetch public GitHub repository '{owner}/{repo_name}' (HTTP {resp.status_code}).",
+                    )
+                tar_bytes = resp.content
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to download GitHub repository '{owner}/{repo_name}': {exc}")
+
+        with tempfile.TemporaryDirectory(prefix="prom_gh_") as tmp_dir:
+            try:
+                with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tf:
+                    for member in tf.getmembers():
+                        if member.name.startswith("/") or ".." in member.name:
+                            continue
+                        tf.extract(member, path=tmp_dir, filter="data")
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=f"Failed to extract repository archive: {exc}")
+
+            subdirs = [os.path.join(tmp_dir, d) for d in os.listdir(tmp_dir) if os.path.isdir(os.path.join(tmp_dir, d))]
+            extracted_root = subdirs[0] if len(subdirs) == 1 else tmp_dir
+            engine = ContinuousImmunologyEngine()
+            res = await engine.run_immunology_sweep(
+                target_dir=extracted_root,
+                auto_publish_pr=req.auto_publish_pr,
+                repo=f"{owner}/{repo_name}",
+            )
+            res["target_dir"] = f"https://github.com/{owner}/{repo_name}"
+            res["scanned_github_repo"] = f"{owner}/{repo_name}"
+            return res
 
     if req.target_dir and req.target_dir != "." and not os.path.isdir(req.target_dir):
         raise HTTPException(
             status_code=400,
-            detail=f"Target directory '{req.target_dir}' does not exist on the server filesystem. For remote repositories, provide a valid mounted directory or clone target.",
+            detail=f"Target directory '{req.target_dir}' does not exist on the server filesystem. Pass a valid local directory or a public GitHub repo URL (e.g. 'https://github.com/owner/repo').",
         )
     target_dir = req.target_dir if (req.target_dir and os.path.isdir(req.target_dir)) else os.getcwd()
     engine = ContinuousImmunologyEngine()
