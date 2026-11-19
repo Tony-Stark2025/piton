@@ -501,12 +501,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auth-header-beta", type=str, help="Enterprise IdP auth header or Bearer token for Tenant Beta (Attacker)")
     parser.add_argument("--max-time", type=float, default=85.0, help="Maximum execution SLA timeout in seconds (default: 85.0s)")
     parser.add_argument("--sla-budget-s", type=float, help="Alias for --max-time SLA timeout budget in seconds")
+    parser.add_argument("--provider", type=str, help="LLM provider override (auto|vertex|gemini|anthropic|openai|copilot|gateway|deterministic)")
+    parser.add_argument("--model", type=str, help="Explicit LLM model override (e.g. gemini-3.8-flash, claude-sonnet-4-5-20250929, gpt-5)")
     return parser
 
 
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if args.provider or args.model:
+        from prometheus.llm.provider_manager import ProviderManager
+        ProviderManager.set_runtime_override(provider=args.provider, model=args.model)
     print_banner()
 
     start_wall_clock = time.perf_counter()

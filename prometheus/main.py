@@ -1237,6 +1237,61 @@ async def readiness_probe():
     }
 
 
+class LLMConfigRequest(BaseModel):
+    provider: Optional[str] = Field(
+        default=None,
+        description="Provider override: auto | vertex | gemini | anthropic | openai | copilot | gateway | deterministic",
+    )
+    model: Optional[str] = Field(
+        default=None,
+        description="Optional explicit model ID (e.g. gemini-3.8-flash, claude-sonnet-4-5-20250929, gpt-5, deepseek-r1)",
+    )
+
+
+@app.get("/api/v1/llm/config", tags=["LLM Routing & Model Switcher"])
+async def get_llm_config():
+    """Returns active LLM provider, resolved model, and available catalog options."""
+    from prometheus.llm.provider_manager import ProviderManager, provider_manager
+    prov, cfg = provider_manager.resolve_provider()
+    return {
+        "active_provider": prov.value,
+        "active_model": cfg.get("model", "deterministic"),
+        "override_provider": ProviderManager._runtime_provider_override,
+        "override_model": ProviderManager._runtime_model_override,
+        "catalog": {
+            "vertex": ["gemini-3.8-flash", "gemini-3.7-flash"],
+            "anthropic": ["claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001"],
+            "openai": ["gpt-5", "gpt-5-mini"],
+            "gateway": ["deepseek-r1", "qwen3-coder-480b"],
+            "deterministic": ["deterministic"],
+        },
+    }
+
+
+@app.post("/api/v1/llm/config", tags=["LLM Routing & Model Switcher"])
+async def update_llm_config(req: LLMConfigRequest):
+    """Switches active LLM provider and/or model at runtime with strict allowlist validation."""
+    from prometheus.llm.provider_manager import ProviderManager, provider_manager
+    allowed_providers = {"auto", "vertex", "gemini", "anthropic", "openai", "copilot", "gateway", "deterministic"}
+    prov_val = req.provider.strip().lower() if req.provider else None
+    if prov_val and prov_val not in allowed_providers:
+        raise HTTPException(status_code=400, detail=f"Unsupported provider '{req.provider}'. Allowed: {sorted(allowed_providers)}")
+    model_val = req.model.strip() if req.model else None
+    if model_val and not re.match(r"^[A-Za-z0-9._:/\-]{2,100}$", model_val):
+        raise HTTPException(status_code=400, detail="Invalid model identifier format.")
+
+    ProviderManager.set_runtime_override(
+        provider=None if prov_val == "auto" else prov_val,
+        model=model_val,
+    )
+    resolved_prov, resolved_cfg = provider_manager.resolve_provider()
+    return {
+        "status": "updated",
+        "active_provider": resolved_prov.value,
+        "active_model": resolved_cfg.get("model", "deterministic"),
+    }
+
+
 @app.post("/api/v1/jobs/scan", status_code=202, tags=["Async Scan Jobs"])
 async def enqueue_async_scan_job(req: PentestScanRequest, request: Request):
     """

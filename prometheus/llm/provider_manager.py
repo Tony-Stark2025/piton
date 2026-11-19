@@ -101,11 +101,13 @@ class ProviderManager:
     _gcloud_token_expiry: float = 0.0
     _gcloud_token_checked: bool = False
     _working_vertex_model: Optional[str] = None
-    _vertex_circuit_open: bool = False
+    _vertex_circuit_open_until: float = 0.0
+    _runtime_provider_override: Optional[str] = None
+    _runtime_model_override: Optional[str] = None
 
     TIER_TIMEOUT_SECONDS: Dict[str, float] = {
-        "recon": 8.0,
-        "explore": 15.0,
+        "recon": 12.0,
+        "explore": 18.0,
         "swe_repair": 30.0,
     }
 
@@ -113,22 +115,30 @@ class ProviderManager:
         "recon": {
             "vertex": "gemini-3.7-flash",
             "gemini": "gemini-3.7-flash",
-            "anthropic": "claude-3-5-haiku-20241022",
-            "openai": "gpt-4o-mini",
+            "anthropic": "claude-haiku-4-5-20251001",
+            "openai": "gpt-5-mini",
         },
         "explore": {
             "vertex": "gemini-3.8-flash",
             "gemini": "gemini-3.8-flash",
-            "anthropic": "claude-3-7-sonnet-20250219",
-            "openai": "gpt-4o",
+            "anthropic": "claude-sonnet-4-5-20250929",
+            "openai": "gpt-5",
         },
         "swe_repair": {
             "vertex": "gemini-3.8-flash",
             "gemini": "gemini-3.8-flash",
-            "anthropic": "claude-3-7-sonnet-20250219",
-            "openai": "gpt-4o",
+            "anthropic": "claude-sonnet-4-5-20250929",
+            "openai": "gpt-5",
         },
     }
+
+    @classmethod
+    def set_runtime_override(cls, provider: Optional[str] = None, model: Optional[str] = None) -> None:
+        """Applies a validated runtime LLM provider/model override and resets circuit state."""
+        cls._runtime_provider_override = provider.strip().lower() if provider else None
+        cls._runtime_model_override = model.strip() if model else None
+        cls._vertex_circuit_open_until = 0.0
+        cls._working_vertex_model = None
 
     def __init__(self, cache_ttl_seconds: Optional[int] = None):
         ttl = cache_ttl_seconds or settings.cache_ttl_seconds
@@ -317,11 +327,14 @@ class ProviderManager:
         3. BYOK Keys (Gemini, Anthropic, OpenAI)
         4. Deterministic Heuristic Engine
         """
-        configured_mode = settings.llm_provider.lower().strip()
+        configured_mode = (self.__class__._runtime_provider_override or settings.llm_provider).lower().strip()
 
         # 1. Explicitly requested provider
         if configured_mode != "auto":
-            return self._resolve_explicit(configured_mode)
+            prov, cfg = self._resolve_explicit(configured_mode)
+            if self.__class__._runtime_model_override:
+                cfg["model"] = self.__class__._runtime_model_override
+            return prov, cfg
 
         # 2. Check In-Service Subscriptions
         # A) GitHub Copilot subscription
@@ -557,20 +570,21 @@ class ProviderManager:
         required for Gemini 3 series models (gemini-3.7-flash, gemini-3.8-flash),
         or falls back to the google.genai unified SDK (location='global') on Cloud Run.
         """
-        if self.__class__._vertex_circuit_open:
+        now = time.time()
+        if now < self.__class__._vertex_circuit_open_until:
             return None
 
         project = config.get("project") or self._detect_gcloud_project()
         location = config.get("location", "global")
-        primary_model = config.get("model", settings.gemini_model)
+        primary_model = self.__class__._runtime_model_override or config.get("model", settings.gemini_model)
 
-        # Active October 2026 Gemini 3 model candidates (Gemini 2.5 series retired Oct 20, 2026)
+        # Active Gemini 3 model candidates
         candidates: List[str] = []
         for m in (self._working_vertex_model, primary_model, "gemini-3.8-flash", "gemini-3.7-flash"):
             if m and m not in candidates:
                 candidates.append(m)
 
-        per_candidate_timeout = min(float(config.get("timeout", settings.llm_request_timeout_seconds)), 4.5)
+        per_candidate_timeout = min(float(config.get("timeout", settings.llm_request_timeout_seconds)), 12.0)
 
         # 1. Direct Vertex AI REST endpoint using gcloud CLI OAuth2 token
         gcloud_token = self._get_gcloud_access_token()
@@ -617,16 +631,18 @@ class ProviderManager:
                             parts = cand_list[0].get("content", {}).get("parts", [])
                             if parts and "text" in parts[0]:
                                 self.__class__._working_vertex_model = candidate_model
+                                self.__class__._vertex_circuit_open_until = 0.0
                                 self.last_model_used = candidate_model
                                 return parts[0]["text"]
                 except Exception as exc:
                     logger.debug(f"Vertex REST attempt on {candidate_model} ({effective_loc}) failed: {exc}")
-            self.__class__._vertex_circuit_open = True
+            # Half-open circuit breaker: retry after 60s instead of permanently disabling Vertex
+            self.__class__._vertex_circuit_open_until = time.time() + 60.0
             return None
 
         # 2. Fallback to google.genai unified SDK ONLY when running on Cloud Run metadata server (K_SERVICE)
         if not os.getenv("K_SERVICE"):
-            self.__class__._vertex_circuit_open = True
+            self.__class__._vertex_circuit_open_until = time.time() + 60.0
             return None
 
         from google import genai
@@ -659,11 +675,12 @@ class ProviderManager:
                     )
                     if resp and resp.text:
                         self.__class__._working_vertex_model = candidate_model
+                        self.__class__._vertex_circuit_open_until = 0.0
                         self.last_model_used = candidate_model
                         return resp.text
                 except Exception:
                     continue
-            self.__class__._vertex_circuit_open = True
+            self.__class__._vertex_circuit_open_until = time.time() + 60.0
             return None
 
         return await asyncio.wait_for(_call(), timeout=per_candidate_timeout)
