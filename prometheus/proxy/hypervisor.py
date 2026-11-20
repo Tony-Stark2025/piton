@@ -6,6 +6,7 @@ verification H(S), and structured semantic denial envelopes.
 """
 
 import json
+import os
 import re
 import time
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Union
@@ -24,6 +25,7 @@ from prometheus.proxy.models import (
 from prometheus.proxy.token_authority import TokenAuthority
 from prometheus.proxy.state_invariants import StateInvariantGate, StateWitnessRegistry
 from prometheus.proxy.denial_envelope import DenialEnvelopeFactory
+from prometheus.proxy.ifc_taint import IFCTaintTracker, VirtualPatchRule
 from prometheus.pentest.route_graph import OpenAPIRouteGraph
 
 logger = structlog.get_logger(__name__)
@@ -42,6 +44,9 @@ class ToolExecutionHypervisor:
         route_graph: Optional[OpenAPIRouteGraph] = None,
         mcp_handler: Optional[Callable[[Dict[str, Any]], Coroutine[Any, Any, Dict[str, Any]]]] = None,
         http_handler: Optional[Callable[[str, str, Optional[Dict[str, Any]], Dict[str, str]], Coroutine[Any, Any, Any]]] = None,
+        ifc_tracker: Optional[IFCTaintTracker] = None,
+        enforce_ifc: bool = True,
+        shadow_mode: Optional[bool] = None,
     ):
         self.token_authority = token_authority or TokenAuthority()
         self.registry = registry or StateWitnessRegistry(self.token_authority)
@@ -50,8 +55,23 @@ class ToolExecutionHypervisor:
             registry=self.registry,
             route_graph=route_graph,
         )
+        self.ifc_tracker = ifc_tracker or IFCTaintTracker()
+        self.enforce_ifc = enforce_ifc
+        self.shadow_mode = (
+            shadow_mode
+            if shadow_mode is not None
+            else (os.getenv("PROMETHEUS_HYPERVISOR_SHADOW_MODE", "false").lower() in ("true", "1", "yes"))
+        )
         self.mcp_handler = mcp_handler
         self.http_handler = http_handler
+
+    def register_virtual_patch(self, rule: VirtualPatchRule) -> VirtualPatchRule:
+        """Activates a runtime virtual patch synthesized from a verified pentest ExploitProof."""
+        return self.ifc_tracker.register_virtual_patch(rule)
+
+    def remove_virtual_patch(self, rule_id: str) -> bool:
+        """Lifts a runtime virtual patch after the verified remediation PR merges."""
+        return self.ifc_tracker.remove_virtual_patch(rule_id)
 
     @staticmethod
     def extract_resource_id_from_path(path: str) -> Optional[str]:
@@ -178,6 +198,8 @@ class ToolExecutionHypervisor:
                         request.target, None
                     )
 
+        shadow_denials: List[SemanticDenialEnvelope] = []
+
         # 1. Capability Attenuation & Caveat Gate
         tenant_id = (
             request.context.get("tenant_id")
@@ -191,56 +213,138 @@ class ToolExecutionHypervisor:
             tenant_id=tenant_id,
         )
         if auth_denial is not None:
-            latency = (time.time() - start_time) * 1000.0
-            return ProxyToolResponse(
-                success=False,
-                status_code=403,
-                denial=auth_denial,
-                latency_ms=latency,
-            )
+            if self.shadow_mode:
+                shadow_denials.append(auth_denial)
+                logger.warning(
+                    "hypervisor_shadow_denial_recorded",
+                    denial_code=auth_denial.denial_code.value,
+                    target=request.target,
+                    session_id=request.session_id,
+                )
+            else:
+                latency = (time.time() - start_time) * 1000.0
+                return ProxyToolResponse(
+                    success=False,
+                    status_code=403,
+                    denial=auth_denial,
+                    latency_ms=latency,
+                )
 
-        # 2. State Invariant & Lineage Gate
-        assert token is not None  # Guaranteed by auth_denial is None
-        effective_tenant = tenant_id or token.scope.tenant_id
-        gate_denial = self.gate.verify_execution_gate(
-            session_id=request.session_id,
+        effective_tenant = tenant_id or (token.scope.tenant_id if token is not None else None)
+
+        # 1b. Static-to-Runtime Virtual Patch Bridge
+        vpatch_denial = self.ifc_tracker.check_virtual_patches(
             method=request.method,
             target=request.target,
-            resource_id=request.resource_id,
-            permit=permit,
-            token=token,
-            payload=request.payload,
             tenant_id=effective_tenant,
+            is_admin=bool(request.context.get("is_admin")),
         )
-        if gate_denial is not None:
-            latency = (time.time() - start_time) * 1000.0
-            return ProxyToolResponse(
-                success=False,
-                status_code=403,
-                denial=gate_denial,
-                latency_ms=latency,
+        if vpatch_denial is not None:
+            if self.shadow_mode:
+                shadow_denials.append(vpatch_denial)
+                logger.warning(
+                    "hypervisor_shadow_denial_recorded",
+                    denial_code=vpatch_denial.denial_code.value,
+                    target=request.target,
+                    session_id=request.session_id,
+                )
+            else:
+                latency = (time.time() - start_time) * 1000.0
+                return ProxyToolResponse(
+                    success=False,
+                    status_code=403,
+                    denial=vpatch_denial,
+                    latency_ms=latency,
+                )
+
+        # 1c. Runtime Information-Flow Control (IFC) Taint Policy (CaMeL/FIDES)
+        if self.enforce_ifc:
+            ifc_denial = self.ifc_tracker.evaluate_flow_policy(
+                session_id=request.session_id,
+                method=request.method,
+                target=request.target,
+                tenant_id=effective_tenant,
+                declassified=bool(request.context.get("declassified")),
+                human_reanchored=bool(request.context.get("human_reanchored")),
             )
+            if ifc_denial is not None:
+                if self.shadow_mode:
+                    shadow_denials.append(ifc_denial)
+                    logger.warning(
+                        "hypervisor_shadow_denial_recorded",
+                        denial_code=ifc_denial.denial_code.value,
+                        target=request.target,
+                        session_id=request.session_id,
+                    )
+                else:
+                    latency = (time.time() - start_time) * 1000.0
+                    return ProxyToolResponse(
+                        success=False,
+                        status_code=403,
+                        denial=ifc_denial,
+                        latency_ms=latency,
+                    )
+
+        # 2. State Invariant & Lineage Gate
+        if token is not None:
+            gate_denial = self.gate.verify_execution_gate(
+                session_id=request.session_id,
+                method=request.method,
+                target=request.target,
+                resource_id=request.resource_id,
+                permit=permit,
+                token=token,
+                payload=request.payload,
+                tenant_id=effective_tenant,
+            )
+            if gate_denial is not None:
+                if self.shadow_mode:
+                    shadow_denials.append(gate_denial)
+                    logger.warning(
+                        "hypervisor_shadow_denial_recorded",
+                        denial_code=gate_denial.denial_code.value,
+                        target=request.target,
+                        session_id=request.session_id,
+                    )
+                else:
+                    latency = (time.time() - start_time) * 1000.0
+                    return ProxyToolResponse(
+                        success=False,
+                        status_code=403,
+                        denial=gate_denial,
+                        latency_ms=latency,
+                    )
 
         # 2b. Atomic single-use permit reservation BEFORE awaiting downstream handler
         # Eliminates concurrent async TOCTOU replay races
         is_mutation = self.gate.is_mutation(request.method, request.target)
         if is_mutation and permit is not None:
             if not self.gate.try_consume_permit(permit.permit_id):
-                latency = (time.time() - start_time) * 1000.0
-                return ProxyToolResponse(
-                    success=False,
-                    status_code=403,
-                    denial=SemanticDenialEnvelope(
-                        denied=True,
-                        denial_code=DenialCode.PERMIT_TAMPERED,
-                        violated_invariant="PermitAlreadyConsumed: ActionPermit is single-use and has already been redeemed.",
-                        details=f"Permit '{permit.permit_id}' cannot be replayed concurrently.",
-                        permitted_alternate_paths=[f"inspect_{request.resource_id or permit.resource_id}"],
-                        suggested_recovery_step="Re-inspect the resource to produce a fresh pre-state witness and request a new ActionPermit.",
-                        timestamp=time.time(),
-                    ),
-                    latency_ms=latency,
+                permit_denial = SemanticDenialEnvelope(
+                    denied=True,
+                    denial_code=DenialCode.PERMIT_TAMPERED,
+                    violated_invariant="PermitAlreadyConsumed: ActionPermit is single-use and has already been redeemed.",
+                    details=f"Permit '{permit.permit_id}' cannot be replayed concurrently.",
+                    permitted_alternate_paths=[f"inspect_{request.resource_id or permit.resource_id}"],
+                    suggested_recovery_step="Re-inspect the resource to produce a fresh pre-state witness and request a new ActionPermit.",
+                    timestamp=time.time(),
                 )
+                if self.shadow_mode:
+                    shadow_denials.append(permit_denial)
+                    logger.warning(
+                        "hypervisor_shadow_denial_recorded",
+                        denial_code=permit_denial.denial_code.value,
+                        target=request.target,
+                        session_id=request.session_id,
+                    )
+                else:
+                    latency = (time.time() - start_time) * 1000.0
+                    return ProxyToolResponse(
+                        success=False,
+                        status_code=403,
+                        denial=permit_denial,
+                        latency_ms=latency,
+                    )
 
         # 3. Admitted: Forward execution to target
         try:
@@ -267,6 +371,15 @@ class ToolExecutionHypervisor:
             witness = None
 
             if not is_mutation:
+                # Propagate deterministic Denning-lattice IFC labels for this read observation
+                if self.enforce_ifc:
+                    self.ifc_tracker.record_observation(
+                        session_id=request.session_id,
+                        method=request.method,
+                        target=request.target,
+                        tenant_id=effective_tenant,
+                    )
+
                 # Read operation succeeded -> produce PreStateWitness and register in lineage
                 res_id = request.resource_id or request.target
                 witness = self.registry.register_state(
@@ -352,6 +465,8 @@ class ToolExecutionHypervisor:
                 result=result_payload,
                 pre_state_witness=witness,
                 latency_ms=latency,
+                shadow_mode_admitted=bool(shadow_denials),
+                shadow_denials=shadow_denials,
             )
 
         except Exception as e:

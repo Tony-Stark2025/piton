@@ -26,6 +26,9 @@ class DenialCode(str, Enum):
     HALLUCINATED_RESOURCE_ID = "HALLUCINATED_RESOURCE_ID"
     PERMIT_TAMPERED = "PERMIT_TAMPERED"
     ATTENUATION_VIOLATION = "ATTENUATION_VIOLATION"
+    IFC_CONFIDENTIALITY_VIOLATION = "IFC_CONFIDENTIALITY_VIOLATION"
+    IFC_INTEGRITY_VIOLATION = "IFC_INTEGRITY_VIOLATION"
+    VIRTUAL_PATCH_BLOCKED = "VIRTUAL_PATCH_BLOCKED"
 
 
 class ScopeBoundary(BaseModel):
@@ -146,3 +149,11 @@ class ProxyToolResponse(BaseModel):
         description="Fresh pre-state witness generated if this was an authorized read"
     )
     latency_ms: float = Field(default=0.0, description="Hypervisor gateway overhead in milliseconds")
+    shadow_mode_admitted: bool = Field(
+        default=False,
+        description="True if a policy violation occurred in passive shadow/observe mode and was logged without blocking"
+    )
+    shadow_denials: List[SemanticDenialEnvelope] = Field(
+        default_factory=list,
+        description="Violations recorded in passive shadow mode for zero-blast-radius auditing"
+    )
