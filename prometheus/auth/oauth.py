@@ -1,7 +1,9 @@
 
 import os
+import secrets
 import time
 import logging
+from urllib.parse import urlencode
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta, timezone
 import jwt
@@ -11,13 +13,23 @@ from prometheus.memory.firestore_store import firestore_store, UserProfile
 
 logger = logging.getLogger('prometheus.auth')
 
-JWT_SECRET = os.getenv('JWT_SECRET', 'prometheus_enterprise_jwt_secret_dev_key_12345')
+
+def _resolve_jwt_secret() -> str:
+    env_secret = os.getenv('JWT_SECRET')
+    if env_secret:
+        return env_secret
+    if os.getenv('ENVIRONMENT', '').lower() == 'production':
+        raise RuntimeError('FATAL: JWT_SECRET environment variable must be configured in production.')
+    return secrets.token_hex(32)
+
+
+JWT_SECRET = _resolve_jwt_secret()
 JWT_ALGORITHM = 'HS256'
 ACCESS_TOKEN_EXPIRE_HOURS = 24
 
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
-GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'https://prometheus-chief-of-staff-135010851380.us-central1.run.app/api/v1/auth/google/callback')
+GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8000/api/v1/auth/google/callback')
 
 def create_session_token(
     user_id: str,
@@ -45,10 +57,12 @@ def decode_session_token(token: str) -> Optional[Dict[str, Any]]:
         logger.debug(f'Invalid session token: {e}')
         return None
 
-def get_google_auth_url(state: str = 'default') -> str:
+def get_google_auth_url(state: Optional[str] = None) -> str:
     if not GOOGLE_CLIENT_ID:
         return '/login?error=missing_google_client_id'
-    
+    if not state:
+        state = secrets.token_urlsafe(32)
+
     base_url = 'https://accounts.google.com/o/oauth2/v2/auth'
     params = {
         'client_id': GOOGLE_CLIENT_ID,
@@ -59,8 +73,7 @@ def get_google_auth_url(state: str = 'default') -> str:
         'access_type': 'offline',
         'prompt': 'select_account'
     }
-    query = '&'.join([f'{k}={v}' for k, v in params.items()])
-    return f'{base_url}?{query}'
+    return f'{base_url}?{urlencode(params)}'
 
 async def exchange_google_code(code: str) -> Optional[Dict[str, Any]]:
     token_url = 'https://oauth2.googleapis.com/token'

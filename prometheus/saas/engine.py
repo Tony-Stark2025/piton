@@ -40,10 +40,12 @@ class SaaSPlatformEngine:
 
     def __init__(self, db_path: str = SAAS_DB_PATH, signing_secret: Optional[str] = None):
         self.db_path = db_path
-        self.signing_secret = (
-            signing_secret
-            or os.getenv("PROMETHEUS_HMAC_SECRET", "prometheus-enterprise-saas-hmac-key-2026")
-        ).encode("utf-8")
+        resolved_secret = signing_secret or os.getenv("PROMETHEUS_HMAC_SECRET")
+        if not resolved_secret:
+            if os.getenv("ENVIRONMENT", "").lower() == "production":
+                raise RuntimeError("FATAL: PROMETHEUS_HMAC_SECRET must be configured in production.")
+            resolved_secret = secrets.token_hex(32)
+        self.signing_secret = resolved_secret.encode("utf-8")
         self._mem_conn: Optional[sqlite3.Connection] = None
         if self.db_path == ":memory:":
             self._mem_conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -513,6 +515,21 @@ class SaaSPlatformEngine:
     # ==========================================================================
     # SOC2 / EU AI Act / CoSAI Cryptographic Compliance Bundle Exporter
     # ==========================================================================
+    @staticmethod
+    def _compute_merkle_root(leaves: List[bytes]) -> str:
+        """Computes a genuine binary SHA-256 Merkle tree root over canonicalized leaf records."""
+        if not leaves:
+            return hashlib.sha256(b"").hexdigest()
+        level = [hashlib.sha256(b"\x00" + leaf).digest() for leaf in leaves]
+        while len(level) > 1:
+            next_level: List[bytes] = []
+            for i in range(0, len(level), 2):
+                left = level[i]
+                right = level[i + 1] if i + 1 < len(level) else left
+                next_level.append(hashlib.sha256(b"\x01" + left + right).digest())
+            level = next_level
+        return level[0].hex()
+
     def generate_compliance_bundle(
         self,
         tenant_id: str,
@@ -527,22 +544,39 @@ class SaaSPlatformEngine:
         now_iso = datetime.now(timezone.utc).isoformat()
         bundle_id = f"COMP-{uuid.uuid4().hex[:12].upper()}"
 
-        canonical_payload = json.dumps(
+        # Build canonical Merkle leaves covering metadata AND every actual audit record
+        header_leaf = json.dumps(
             {
+                "leaf_type": "bundle_header",
                 "bundle_id": bundle_id,
+                "generated_at": now_iso,
                 "tenant_id": tenant_id,
                 "organization_name": org.name,
                 "tier": org.tier.value,
                 "posture_score": posture_score,
                 "usage": usage.model_dump(),
-                "asi_controls_count": len(asi_control_matrix),
-                "abac_events_count": len(recent_abac_decisions),
-                "asi_interceptions_count": len(recent_asi_interceptions),
                 "active_witness_count": active_witness_count,
             },
             sort_keys=True,
-        )
-        merkle_root = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+
+        leaves: List[bytes] = [header_leaf]
+        for ctrl in asi_control_matrix:
+            leaves.append(
+                json.dumps({"leaf_type": "asi_control", "data": ctrl}, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            )
+        for dec in recent_abac_decisions:
+            leaves.append(
+                json.dumps({"leaf_type": "abac_decision", "data": dec}, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            )
+        for inter in recent_asi_interceptions:
+            leaves.append(
+                json.dumps({"leaf_type": "asi_interception", "data": inter}, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            )
+
+        merkle_root = self._compute_merkle_root(leaves)
         signature = hmac.new(
             self.signing_secret,
             f"{bundle_id}:{tenant_id}:{merkle_root}".encode("utf-8"),
@@ -564,8 +598,9 @@ class SaaSPlatformEngine:
             ledger_merkle_root_sha256=merkle_root,
             hmac_signature=signature,
             verification_instructions=(
-                "Verify integrity via HMAC-SHA256(secret, f'{bundle_id}:{tenant_id}:{ledger_merkle_root_sha256}'). "
-                "Compliant with EU AI Act Art. 12/15 automatic logging and SOC2 CC6.1/CC7.2 non-repudiation."
+                "Verify leaf integrity via binary SHA-256 Merkle root (domain-separated 0x00/0x01) over header + all "
+                "controls, ABAC decisions, and ASI interceptions, then verify HMAC-SHA256(secret, "
+                "f'{bundle_id}:{tenant_id}:{ledger_merkle_root_sha256}')."
             ),
         )
 

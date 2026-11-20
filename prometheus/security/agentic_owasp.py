@@ -364,6 +364,12 @@ class OWASPAgenticEngine:
         )
         with self._get_conn() as conn:
             cur = conn.cursor()
+            cur.execute("SELECT tenant_id FROM mcp_gateway_servers WHERE server_id = ?", (server_id,))
+            existing = cur.fetchone()
+            if existing and existing["tenant_id"] != tenant_id:
+                raise PermissionError(
+                    f"Forbidden: MCP server_id '{server_id}' is owned by another tenant and cannot be overwritten."
+                )
             cur.execute(
                 """
                 INSERT OR REPLACE INTO mcp_gateway_servers
@@ -385,10 +391,16 @@ class OWASPAgenticEngine:
             conn.commit()
         return srv
 
-    def get_mcp_server(self, server_id: str) -> Optional[RegisteredMCPServer]:
+    def get_mcp_server(self, server_id: str, tenant_id: Optional[str] = None) -> Optional[RegisteredMCPServer]:
         with self._get_conn() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT * FROM mcp_gateway_servers WHERE server_id = ?", (server_id,))
+            if tenant_id is not None:
+                cur.execute(
+                    "SELECT * FROM mcp_gateway_servers WHERE server_id = ? AND (tenant_id = ? OR transport = 'internal')",
+                    (server_id, tenant_id),
+                )
+            else:
+                cur.execute("SELECT * FROM mcp_gateway_servers WHERE server_id = ?", (server_id,))
             row = cur.fetchone()
             if not row:
                 return None
@@ -408,7 +420,7 @@ class OWASPAgenticEngine:
         with self._get_conn() as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT * FROM mcp_gateway_servers WHERE tenant_id IN (?, 'default_enterprise') ORDER BY created_at DESC",
+                "SELECT * FROM mcp_gateway_servers WHERE tenant_id = ? OR transport = 'internal' ORDER BY created_at DESC",
                 (tenant_id,),
             )
             rows = cur.fetchall()
@@ -678,7 +690,7 @@ class OWASPAgenticEngine:
             cur.execute(
                 """
                 SELECT * FROM asi_inspection_logs
-                WHERE tenant_id IN (?, 'default_enterprise')
+                WHERE tenant_id = ?
                 ORDER BY timestamp DESC LIMIT ?
                 """,
                 (tenant_id, limit),

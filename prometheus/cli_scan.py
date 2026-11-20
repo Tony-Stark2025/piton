@@ -762,8 +762,10 @@ def main() -> None:
             if not (resolved_spec_url.startswith("http://") or resolved_spec_url.startswith("https://")):
                 resolved_spec_url = f"{args.target_url.rstrip('/')}/{resolved_spec_url.lstrip('/')}"
             print(f"[*] Validating and fetching OpenAPI spec from: {resolved_spec_url}...")
+            from urllib.parse import urlparse
             from prometheus.pentest.exploit_prober import validate_ssrf
-            is_local = any(h in resolved_spec_url for h in ("127.0.0.1", "localhost", "[::1]"))
+            parsed_spec_host = (urlparse(resolved_spec_url).hostname or "").lower()
+            is_local = parsed_spec_host in ("127.0.0.1", "localhost", "::1")
             validate_ssrf(resolved_spec_url, allow_loopback=is_local)
             try:
                 resp = httpx.get(resolved_spec_url, timeout=15.0, follow_redirects=False, trust_env=False)

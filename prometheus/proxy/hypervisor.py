@@ -79,7 +79,8 @@ class ToolExecutionHypervisor:
         numeric_id_pattern = re.compile(r"^\d+$")
         slug_id_pattern = re.compile(r"^[a-zA-Z0-9]+[_-][a-zA-Z0-9_-]+$")
 
-        for seg in reversed(segments):
+        for idx in range(len(segments) - 1, -1, -1):
+            seg = segments[idx]
             seg_lower = seg.lower()
             if seg_lower in api_prefixes or seg_lower in system_endpoints or seg_lower in collection_names:
                 continue
@@ -90,6 +91,10 @@ class ToolExecutionHypervisor:
                 or numeric_id_pattern.match(seg)
                 or slug_id_pattern.match(seg)
             ):
+                return seg
+
+            # Support single-word, ULID, or NanoID resource identifiers immediately following a known collection segment (e.g. /users/alice)
+            if idx > 0 and segments[idx - 1].lower() in collection_names and re.match(r"^[a-zA-Z0-9._-]{2,128}$", seg):
                 return seg
 
         return None
@@ -196,6 +201,7 @@ class ToolExecutionHypervisor:
 
         # 2. State Invariant & Lineage Gate
         assert token is not None  # Guaranteed by auth_denial is None
+        effective_tenant = tenant_id or token.scope.tenant_id
         gate_denial = self.gate.verify_execution_gate(
             session_id=request.session_id,
             method=request.method,
@@ -204,6 +210,7 @@ class ToolExecutionHypervisor:
             permit=permit,
             token=token,
             payload=request.payload,
+            tenant_id=effective_tenant,
         )
         if gate_denial is not None:
             latency = (time.time() - start_time) * 1000.0
@@ -213,6 +220,27 @@ class ToolExecutionHypervisor:
                 denial=gate_denial,
                 latency_ms=latency,
             )
+
+        # 2b. Atomic single-use permit reservation BEFORE awaiting downstream handler
+        # Eliminates concurrent async TOCTOU replay races
+        is_mutation = self.gate.is_mutation(request.method, request.target)
+        if is_mutation and permit is not None:
+            if not self.gate.try_consume_permit(permit.permit_id):
+                latency = (time.time() - start_time) * 1000.0
+                return ProxyToolResponse(
+                    success=False,
+                    status_code=403,
+                    denial=SemanticDenialEnvelope(
+                        denied=True,
+                        denial_code=DenialCode.PERMIT_TAMPERED,
+                        violated_invariant="PermitAlreadyConsumed: ActionPermit is single-use and has already been redeemed.",
+                        details=f"Permit '{permit.permit_id}' cannot be replayed concurrently.",
+                        permitted_alternate_paths=[f"inspect_{request.resource_id or permit.resource_id}"],
+                        suggested_recovery_step="Re-inspect the resource to produce a fresh pre-state witness and request a new ActionPermit.",
+                        timestamp=time.time(),
+                    ),
+                    latency_ms=latency,
+                )
 
         # 3. Admitted: Forward execution to target
         try:
@@ -237,7 +265,6 @@ class ToolExecutionHypervisor:
                 result_payload = {"status": "executed", "target": request.target, "method": request.method}
 
             witness = None
-            is_mutation = self.gate.is_mutation(request.method, request.target)
 
             if not is_mutation:
                 # Read operation succeeded -> produce PreStateWitness and register in lineage
@@ -246,12 +273,14 @@ class ToolExecutionHypervisor:
                     resource_id=res_id,
                     state_data=result_payload,
                     source_op=f"{request.method} {request.target}",
+                    tenant_id=effective_tenant,
                 )
                 self.gate.lineage_tracker.record_read(
                     session_id=request.session_id,
                     resource_id=res_id,
                     witness=witness,
                     op_name=f"{request.method} {request.target}",
+                    tenant_id=effective_tenant,
                 )
 
                 # Also automatically witness entities if payload is an array or collection dict
@@ -277,21 +306,19 @@ class ToolExecutionHypervisor:
                                 resource_id=item_id_str,
                                 state_data=item,
                                 source_op=f"{request.method} {request.target}",
+                                tenant_id=effective_tenant,
                             )
                             self.gate.lineage_tracker.record_read(
                                 session_id=request.session_id,
                                 resource_id=item_id_str,
                                 witness=item_witness,
                                 op_name=f"{request.method} {request.target}",
+                                tenant_id=effective_tenant,
                             )
             else:
-                # Mutation succeeded -> mark permit consumed to prevent replay attacks
-                if permit:
-                    self.gate.mark_permit_consumed(permit.permit_id)
-
                 if request.method.upper() == "DELETE" or any(request.target.lower().startswith(p) for p in ("delete_", "remove_")):
                     if request.resource_id:
-                        self.registry.delete_state(request.resource_id)
+                        self.registry.delete_state(request.resource_id, tenant_id=effective_tenant)
                 else:
                     target_id = request.resource_id
                     if not target_id and isinstance(result_payload, dict):
@@ -308,12 +335,14 @@ class ToolExecutionHypervisor:
                             resource_id=target_id_str,
                             new_state_data=result_payload,
                             source_op=f"{request.method} {request.target}",
+                            tenant_id=effective_tenant,
                         )
                         self.gate.lineage_tracker.record_read(
                             session_id=request.session_id,
                             resource_id=target_id_str,
                             witness=mut_witness,
                             op_name=f"{request.method} {request.target}",
+                            tenant_id=effective_tenant,
                         )
 
             latency = (time.time() - start_time) * 1000.0
@@ -341,6 +370,7 @@ class ToolExecutionHypervisor:
         token: Optional[Union[str, CapabilityToken, Dict[str, Any]]] = None,
         permit: Optional[Union[str, ActionPermit, Dict[str, Any]]] = None,
         session_id: str = "default_session",
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Intercepts and mediates standard JSON-RPC 2.0 MCP tool calls.
@@ -385,6 +415,10 @@ class ToolExecutionHypervisor:
                 or request_dict.get("permit")
             )
 
+            ctx = {"rpc_id": req_id}
+            if tenant_id is not None:
+                ctx["tenant_id"] = tenant_id
+
             proxy_req = ProxyToolRequest(
                 call_type=ToolCallType.MCP,
                 method=tool_name,
@@ -394,7 +428,7 @@ class ToolExecutionHypervisor:
                 token=active_token,
                 action_permit=self._resolve_permit(active_permit),
                 session_id=session_id,
-                context={"rpc_id": req_id},
+                context=ctx,
             )
 
             resp = await self.execute_tool(proxy_req)

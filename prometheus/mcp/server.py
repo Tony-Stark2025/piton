@@ -170,12 +170,13 @@ class PrometheusMCPServer:
     def __init__(
         self,
         hypervisor: Optional[ToolExecutionHypervisor] = None,
-        enforce_hypervisor: bool = False,
+        enforce_hypervisor: Optional[bool] = None,
     ):
-        self.enforce_hypervisor = (
-            enforce_hypervisor
-            or os.getenv("PROMETHEUS_ENFORCE_HYPERVISOR", "false").lower() in ("true", "1", "yes")
-        )
+        if enforce_hypervisor is not None:
+            self.enforce_hypervisor = enforce_hypervisor
+        else:
+            env_val = os.getenv("PROMETHEUS_ENFORCE_HYPERVISOR", "true").lower()
+            self.enforce_hypervisor = env_val not in ("false", "0", "no")
         if hypervisor:
             self.hypervisor = hypervisor
         else:
@@ -200,6 +201,7 @@ class PrometheusMCPServer:
         token: Optional[Any] = None,
         permit: Optional[Any] = None,
         session_id: str = "mcp_session",
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Processes incoming JSON-RPC 2.0 requests according to MCP specifications."""
         req_id = request_dict.get("id")
@@ -248,6 +250,7 @@ class PrometheusMCPServer:
                         token=token,
                         permit=permit,
                         session_id=session_id,
+                        tenant_id=tenant_id,
                     )
 
                 res = await self._execute_tool(tool_name, args)
@@ -304,13 +307,14 @@ class PrometheusMCPServer:
             if not token:
                 raise ValueError("Invalid or missing capability token.")
             target_op = args.get("target_op")
-            resource_id = str(args.get("resource_id", "*"))
-            witness = self.hypervisor.registry.get_witness(resource_id)
+            resource_id = str(args.get("resource_id", ""))
+            if not resource_id or resource_id == "*":
+                raise ValueError("A concrete resource_id is required to mint an ActionPermit.")
+            witness = self.hypervisor.registry.get_witness(resource_id, tenant_id=token.scope.tenant_id)
             if witness is None:
-                witness = self.hypervisor.registry.register_state(
-                    resource_id=resource_id,
-                    state_data={"resource_id": resource_id},
-                    source_op=f"mcp_permit {target_op}",
+                raise ValueError(
+                    f"PreStateWitnessMissing: No verified pre-state witness H(S) exists for resource '{resource_id}'. "
+                    "Read/inspect the resource before requesting a mutation permit."
                 )
             permit = self.hypervisor.token_authority.mint_action_permit(
                 token=token,

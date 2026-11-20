@@ -33,7 +33,8 @@ COPY --chown=appuser:appuser . .
 
 USER appuser
 
-ENV PORT=8080
+ENV PORT=8080 \
+    ENVIRONMENT=production
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \

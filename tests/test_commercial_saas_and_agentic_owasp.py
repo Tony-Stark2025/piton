@@ -163,14 +163,27 @@ def test_owasp_agentic_top_10_all_categories(isolated_agentic_engine: OWASPAgent
 
 def test_fastapi_saas_and_mcp_gateway_endpoints():
     """End-to-end integration test of REST endpoints for API keys, MCP Gateway, and Compliance Export."""
-    client = TestClient(app)
+    from prometheus.auth.oauth import create_session_token
+    from prometheus.mcp.server import mcp_server
 
-    # Ensure default_enterprise is on Enterprise tier
-    client.post("/api/v1/saas/tenant/tier", json={"tier": "enterprise"})
+    client = TestClient(app)
+    admin_jwt = create_session_token(
+        user_id="admin-e2e",
+        email="admin@enterprise.io",
+        tenant_id="default_enterprise",
+        roles=["admin"],
+        scopes=["*"],
+    )
+    admin_headers = {"Authorization": f"Bearer {admin_jwt}"}
+
+    # Ensure default_enterprise is on Enterprise tier (requires admin auth)
+    tier_resp = client.post("/api/v1/saas/tenant/tier", headers=admin_headers, json={"tier": "enterprise"})
+    assert tier_resp.status_code == 200
 
     # 1. Mint a new API key via REST endpoint
     key_resp = client.post(
         "/api/v1/saas/api-keys",
+        headers=admin_headers,
         json={"name": "E2E Integration Key", "scopes": ["pentest:scan", "mcp:gateway", "compliance:read"]},
     )
     assert key_resp.status_code == 200
@@ -187,13 +200,21 @@ def test_fastapi_saas_and_mcp_gateway_endpoints():
     assert me_json["auth_method"] == "api_key"
     assert me_json["api_key_id"] == key_id
 
-    # 3. Proxy a safe MCP tool call through /api/v1/mcp/gateway/proxy using Bearer API key
+    # 3. Proxy a safe MCP tool call through /api/v1/mcp/gateway/proxy using Bearer API key + valid capability token
+    cap_token = mcp_server.hypervisor.token_authority.mint_token(
+        subject="test-copilot-agent",
+        allowed_methods=["mint_capability_token", "GET"],
+        allowed_resource_ids=["*"],
+        ttl_seconds=60,
+        tenant_id="default_enterprise",
+    )
     gw_safe = client.post(
         "/api/v1/mcp/gateway/proxy",
         headers={"Authorization": f"Bearer {raw_key}"},
         json={
             "server_id": "prometheus-local-mcp",
             "agent_id": "test-copilot-agent",
+            "capability_token": cap_token.model_dump(),
             "jsonrpc_payload": {
                 "jsonrpc": "2.0",
                 "id": 101,

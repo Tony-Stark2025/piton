@@ -233,11 +233,11 @@ async def test_v25_rest_and_mcp_interfaces():
     """Verifies /api/v1/immunology/scan, /api/v1/pentest/swe-patch, and all v2.5 MCP tools."""
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
-        # 1. REST /api/v1/pentest/swe-patch
+        # 1. REST /api/v1/pentest/swe-patch against an actual workspace file
         swe_resp = await client.post(
             "/api/v1/pentest/swe-patch",
             json={
-                "target_file": "app/api/invoices.py",
+                "target_file": "tests/fixtures/crapi_benchmark_app.py",
                 "target_endpoint": "/api/v1/invoices/{invoice_id}",
                 "http_method": "GET",
                 "vector": "BOLA_IDOR",
@@ -260,6 +260,12 @@ async def test_v25_rest_and_mcp_interfaces():
 
         # 3. MCP tools/call -> prometheus_synthesize_patch, prometheus_verify_exposure, prometheus_generate_poc
         mcp_server = PrometheusMCPServer()
+        mcp_tok = mcp_server.hypervisor.token_authority.mint_token(
+            subject="v25-test",
+            allowed_methods=["prometheus_synthesize_patch", "prometheus_verify_exposure", "prometheus_generate_poc"],
+            allowed_resource_ids=["*"],
+            ttl_seconds=60,
+        )
         mcp_resp = await mcp_server.handle_jsonrpc(
             {
                 "jsonrpc": "2.0",
@@ -274,7 +280,8 @@ async def test_v25_rest_and_mcp_interfaces():
                         "vector": "BOLA_IDOR",
                     },
                 },
-            }
+            },
+            token=mcp_tok,
         )
         assert "result" in mcp_resp
         parsed_content = json.loads(mcp_resp["result"]["content"][0]["text"])
@@ -292,7 +299,8 @@ async def test_v25_rest_and_mcp_interfaces():
                         "package_name": "httpx",
                     },
                 },
-            }
+            },
+            token=mcp_tok,
         )
         exp_data = json.loads(exp_resp["result"]["content"][0]["text"])
         assert exp_data["is_reachable_in_repo"] is True
@@ -311,7 +319,8 @@ async def test_v25_rest_and_mcp_interfaces():
                         "headers": {"Authorization": "Bearer super-secret-jwt"},
                     },
                 },
-            }
+            },
+            token=mcp_tok,
         )
         poc_data = json.loads(poc_resp["result"]["content"][0]["text"])
         assert "httpx.request" in poc_data["reproduction_script_python"]
@@ -490,12 +499,18 @@ async def test_immunology_dependency_upgrade_patch_and_mcp_publish_pr(tmp_path):
     assert "+    \"nodemailer\": \"^6.9.16\"" in patch_plan["git_diff"]
     assert "package.json" in patch_plan["patched_files"]
 
-    # Verify MCP prometheus_publish_pr tool is listed and callable
+    # Verify MCP prometheus_publish_pr tool is listed and callable with a valid capability token
     mcp_srv = PrometheusMCPServer()
     list_resp = await mcp_srv.handle_jsonrpc({"jsonrpc": "2.0", "id": 91, "method": "tools/list", "params": {}})
     tool_names = [t["name"] for t in list_resp["result"]["tools"]]
     assert "prometheus_publish_pr" in tool_names
 
+    pub_tok = mcp_srv.hypervisor.token_authority.mint_token(
+        subject="ci-immunology",
+        allowed_methods=["prometheus_publish_pr"],
+        allowed_resource_ids=["*"],
+        ttl_seconds=60,
+    )
     pub_resp = await mcp_srv.handle_jsonrpc(
         {
             "jsonrpc": "2.0",
@@ -510,7 +525,8 @@ async def test_immunology_dependency_upgrade_patch_and_mcp_publish_pr(tmp_path):
                     "patched_files": patch_plan["patched_files"],
                 },
             },
-        }
+        },
+        token=pub_tok,
     )
     pub_data = json.loads(pub_resp["result"]["content"][0]["text"])
     assert pub_data["status"] in ("MISSING_CREDENTIALS", "PR_OPENED", "BASE_BRANCH_NOT_FOUND")
@@ -592,66 +608,71 @@ async def test_semantic_logic_auditor_and_three_tier_disposition(tmp_path):
 
 @pytest.mark.asyncio
 async def test_cegis_compiled_ast_execution_verification():
-    """Verifies DualPassVerifier compiles and executes real patched Python handler AST instead of closure fallback."""
+    """Verifies DualPassVerifier rejects unpatched routes and certifies genuinely patched live routes without unsandboxed exec()."""
     from fastapi import Depends, HTTPException, Request
     from prometheus.pentest.cegis_verifier import DualPassVerifier
     from prometheus.pentest.models import AutoPatchResult
 
-    cegis_app = FastAPI()
     ITEMS = {"item-alpha-001": {"id": "item-alpha-001", "tenant_id": "org-alpha-victim-001", "secret": "s3cr3t"}}
 
     def get_tenant(request: Request) -> str:
         return request.headers.get("x-tenant-id", "")
 
-    @cegis_app.get("/api/v1/items/{item_id}")
-    async def get_item(item_id: str, tenant_id: str = Depends(get_tenant)):
+    # 1. Unpatched app MUST fail DualPassVerifier (never faked via exec/monkey-patch)
+    unpatched_app = FastAPI()
+
+    @unpatched_app.get("/api/v1/items/{item_id}")
+    async def get_item_vuln(item_id: str, tenant_id: str = Depends(get_tenant)):
         item = ITEMS.get(item_id)
         if not item:
             raise HTTPException(status_code=404, detail="Not found")
         return item
 
-    # Real patched handler code that enforces tenant_id check
-    patched_python_code = (
-        '@cegis_app.get("/api/v1/items/{item_id}")\n'
-        "async def get_item(item_id: str, tenant_id: str = Depends(get_tenant)):\n"
-        "    item = ITEMS.get(item_id)\n"
-        "    if not item:\n"
-        '        raise HTTPException(status_code=404, detail="Not found")\n'
-        '    if item.get("tenant_id") != tenant_id:\n'
-        '        raise HTTPException(status_code=403, detail="Forbidden: Tenant mismatch")\n'
-        "    return item\n"
+    # 2. Genuinely patched app MUST pass Pass 1 (403) and Pass 2 (200 + canary intact)
+    patched_app = FastAPI()
+
+    @patched_app.get("/api/v1/items/{item_id}")
+    async def get_item_fixed(item_id: str, tenant_id: str = Depends(get_tenant)):
+        item = ITEMS.get(item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Not found")
+        if item.get("tenant_id") != tenant_id:
+            raise HTTPException(status_code=403, detail="Forbidden: Tenant mismatch")
+        return item
+
+    ctx = StateSynthesizer().create_dual_context()
+    ctx.tenant_alpha.headers["x-tenant-id"] = "org-alpha-victim-001"
+    ctx.tenant_beta.headers["x-tenant-id"] = "org-beta-attacker-999"
+    ctx.seeded_resources["item"] = {"resource_id": "item-alpha-001", "confidential_marker": "s3cr3t"}
+    route = RouteEndpoint(path="/api/v1/items/{item_id}", method=HttpMethod.GET, path_parameters=["item_id"])
+    patch = AutoPatchResult(
+        target_file="app/api/items.py",
+        git_diff="--- a/app/api/items.py\n+++ b/app/api/items.py\n@@ -1 +1 @@\n",
+        verification_status="PENDING",
+        previous_exploit_status=200,
+        post_patch_status=0,
     )
 
-    transport = httpx.ASGITransport(app=cegis_app)
-    prober = ExploitProber(base_url="http://testserver", transport=transport, allow_loopback=True)
+    prober_vuln = ExploitProber(base_url="http://testserver", transport=httpx.ASGITransport(app=unpatched_app), allow_loopback=True)
+    prober_fixed = ExploitProber(base_url="http://testserver", transport=httpx.ASGITransport(app=patched_app), allow_loopback=True)
     try:
-        verifier = DualPassVerifier(prober=prober)
-        ctx = StateSynthesizer().create_dual_context()
-        ctx.tenant_alpha.headers["x-tenant-id"] = "org-alpha-victim-001"
-        ctx.tenant_beta.headers["x-tenant-id"] = "org-beta-attacker-999"
-        ctx.seeded_resources["item"] = {"resource_id": "item-alpha-001", "canary_marker": "s3cr3t"}
+        ok_v, reason_v, atk_v, _ = await DualPassVerifier(prober=prober_vuln).verify_patch_dual_pass(
+            route=route, context=ctx, target_resource_type="item", patch=patch
+        )
+        assert ok_v is False
+        assert reason_v == "UNRESOLVED_EXPLOIT"
+        assert atk_v == 200
 
-        route = RouteEndpoint(path="/api/v1/items/{item_id}", method=HttpMethod.GET, path_parameters=["item_id"])
-        patch = AutoPatchResult(
-            target_file="app/api/items.py",
-            git_diff="--- a/app/api/items.py\n+++ b/app/api/items.py\n@@ -1 +1 @@\n",
-            verification_status="PENDING",
-            previous_exploit_status=200,
-            post_patch_status=0,
-            patched_code=patched_python_code,
+        ok_f, reason_f, atk_f, vic_f = await DualPassVerifier(prober=prober_fixed).verify_patch_dual_pass(
+            route=route, context=ctx, target_resource_type="item", patch=patch
         )
-        ok, status_msg, atk_code, vic_code = await verifier.verify_patch_dual_pass(
-            route=route,
-            context=ctx,
-            target_resource_type="item",
-            patch=patch,
-        )
-        assert ok is True
-        assert status_msg == "CERTIFIED_FIX"
-        assert atk_code == 403
-        assert vic_code == 200
+        assert ok_f is True
+        assert reason_f == "CERTIFIED_FIX"
+        assert atk_f == 403
+        assert vic_f == 200
     finally:
-        await prober.aclose()
+        await prober_vuln.aclose()
+        await prober_fixed.aclose()
 
 
 def test_immunology_route_to_cve_bridge(tmp_path):

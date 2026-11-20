@@ -26,9 +26,10 @@ logger = structlog.get_logger(__name__)
 
 class StateWitnessRegistry:
     """
-    Thread-safe registry of canonical live states and pre-state witness hashes.
-    Simulates / integrates with the active backend persistence layer.
+    Thread-safe, tenant-isolated registry of canonical live states and pre-state witness hashes.
     """
+
+    MAX_ENTRIES = 10_000
 
     def __init__(self, token_authority: Optional[TokenAuthority] = None):
         self._lock = threading.RLock()
@@ -37,62 +38,116 @@ class StateWitnessRegistry:
         self._consumed_permits: Set[str] = set()
         self._token_authority = token_authority or TokenAuthority()
 
+    @staticmethod
+    def _scope_key(resource_id: str, tenant_id: Optional[str] = None) -> str:
+        if tenant_id:
+            return f"{tenant_id}::{resource_id}"
+        return resource_id
+
+    def _evict_if_needed(self) -> None:
+        if len(self._states) >= self.MAX_ENTRIES:
+            oldest = next(iter(self._states))
+            self._states.pop(oldest, None)
+            self._witnesses.pop(oldest, None)
+        if len(self._consumed_permits) >= self.MAX_ENTRIES * 2:
+            # Prune half of oldest set entries to keep memory bounded
+            to_drop = list(self._consumed_permits)[: self.MAX_ENTRIES]
+            for pid in to_drop:
+                self._consumed_permits.discard(pid)
+
+    def try_consume_permit(self, permit_id: str) -> bool:
+        """
+        Atomically checks and consumes a single-use ActionPermit BEFORE downstream dispatch.
+        Returns True if this caller won the atomic reservation, False if already consumed (replay).
+        """
+        with self._lock:
+            if permit_id in self._consumed_permits:
+                return False
+            self._evict_if_needed()
+            self._consumed_permits.add(permit_id)
+            return True
+
     def mark_permit_consumed(self, permit_id: str) -> None:
         with self._lock:
+            self._evict_if_needed()
             self._consumed_permits.add(permit_id)
 
     def is_permit_consumed(self, permit_id: str) -> bool:
         with self._lock:
             return permit_id in self._consumed_permits
 
-    def register_state(self, resource_id: str, state_data: Any, source_op: str = "seed") -> PreStateWitness:
+    def register_state(
+        self,
+        resource_id: str,
+        state_data: Any,
+        source_op: str = "seed",
+        tenant_id: Optional[str] = None,
+    ) -> PreStateWitness:
+        key = self._scope_key(resource_id, tenant_id)
         with self._lock:
-            self._states[resource_id] = state_data
+            self._evict_if_needed()
+            self._states[key] = state_data
             witness = self._token_authority.create_pre_state_witness(
                 resource_id=resource_id,
                 state_data=state_data,
                 source_op=source_op,
             )
-            self._witnesses[resource_id] = witness
+            self._witnesses[key] = witness
             return witness
 
-    def get_state(self, resource_id: str) -> Optional[Any]:
+    def get_state(self, resource_id: str, tenant_id: Optional[str] = None) -> Optional[Any]:
+        key = self._scope_key(resource_id, tenant_id)
         with self._lock:
-            return self._states.get(resource_id)
+            return self._states.get(key)
 
-    def get_state_hash(self, resource_id: str) -> Optional[str]:
+    def get_state_hash(self, resource_id: str, tenant_id: Optional[str] = None) -> Optional[str]:
+        key = self._scope_key(resource_id, tenant_id)
         with self._lock:
-            if resource_id not in self._states:
+            if key not in self._states:
                 return None
-            return self._token_authority.compute_state_hash(self._states[resource_id])
+            return self._token_authority.compute_state_hash(self._states[key])
 
-    def get_witness(self, resource_id: str) -> Optional[PreStateWitness]:
+    def get_witness(self, resource_id: str, tenant_id: Optional[str] = None) -> Optional[PreStateWitness]:
+        key = self._scope_key(resource_id, tenant_id)
         with self._lock:
-            return self._witnesses.get(resource_id)
+            return self._witnesses.get(key)
 
-    def update_state(self, resource_id: str, new_state_data: Any, source_op: str = "update") -> PreStateWitness:
+    def update_state(
+        self,
+        resource_id: str,
+        new_state_data: Any,
+        source_op: str = "update",
+        tenant_id: Optional[str] = None,
+    ) -> PreStateWitness:
+        key = self._scope_key(resource_id, tenant_id)
         with self._lock:
-            self._states[resource_id] = new_state_data
+            self._evict_if_needed()
+            self._states[key] = new_state_data
             witness = self._token_authority.create_pre_state_witness(
                 resource_id=resource_id,
                 state_data=new_state_data,
                 source_op=source_op,
             )
-            self._witnesses[resource_id] = witness
+            self._witnesses[key] = witness
             return witness
 
-    def delete_state(self, resource_id: str) -> None:
+    def delete_state(self, resource_id: str, tenant_id: Optional[str] = None) -> None:
+        key = self._scope_key(resource_id, tenant_id)
         with self._lock:
-            self._states.pop(resource_id, None)
-            self._witnesses.pop(resource_id, None)
+            self._states.pop(key, None)
+            self._witnesses.pop(key, None)
 
-    def has_resource(self, resource_id: str) -> bool:
+    def has_resource(self, resource_id: str, tenant_id: Optional[str] = None) -> bool:
+        key = self._scope_key(resource_id, tenant_id)
         with self._lock:
-            return resource_id in self._states
+            return key in self._states
 
-    def list_known_resources(self) -> List[str]:
+    def list_known_resources(self, tenant_id: Optional[str] = None) -> List[str]:
         with self._lock:
-            return list(self._states.keys())
+            if tenant_id:
+                prefix = f"{tenant_id}::"
+                return [k[len(prefix):] for k in self._states.keys() if k.startswith(prefix)]
+            return [k for k in self._states.keys() if "::" not in k]
 
 
 class CausalLineageTracker:
@@ -102,29 +157,49 @@ class CausalLineageTracker:
 
     def __init__(self):
         self._lock = threading.RLock()
-        # session_id -> {resource_id -> PreStateWitness}
+        # session_id -> {scoped_resource_key -> PreStateWitness}
         self._session_witnesses: Dict[str, Dict[str, PreStateWitness]] = {}
         # session_id -> list of executed op signatures e.g. ["GET /api/v1/items/1"]
         self._session_history: Dict[str, List[str]] = {}
 
-    def record_read(self, session_id: str, resource_id: str, witness: PreStateWitness, op_name: str) -> None:
+    def record_read(
+        self,
+        session_id: str,
+        resource_id: str,
+        witness: PreStateWitness,
+        op_name: str,
+        tenant_id: Optional[str] = None,
+    ) -> None:
+        key = StateWitnessRegistry._scope_key(resource_id, tenant_id)
         with self._lock:
             if session_id not in self._session_witnesses:
                 self._session_witnesses[session_id] = {}
                 self._session_history[session_id] = []
-            self._session_witnesses[session_id][resource_id] = witness
+            self._session_witnesses[session_id][key] = witness
             self._session_history[session_id].append(op_name)
 
-    def has_read_witness(self, session_id: str, resource_id: str) -> bool:
+    def has_read_witness(
+        self,
+        session_id: str,
+        resource_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> bool:
+        key = StateWitnessRegistry._scope_key(resource_id, tenant_id)
         with self._lock:
             return (
                 session_id in self._session_witnesses
-                and resource_id in self._session_witnesses[session_id]
+                and key in self._session_witnesses[session_id]
             )
 
-    def get_witness(self, session_id: str, resource_id: str) -> Optional[PreStateWitness]:
+    def get_witness(
+        self,
+        session_id: str,
+        resource_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[PreStateWitness]:
+        key = StateWitnessRegistry._scope_key(resource_id, tenant_id)
         with self._lock:
-            return self._session_witnesses.get(session_id, {}).get(resource_id)
+            return self._session_witnesses.get(session_id, {}).get(key)
 
     def get_history(self, session_id: str) -> List[str]:
         with self._lock:
@@ -140,12 +215,14 @@ class StateInvariantGate:
     MUTATING_HTTP_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
     MUTATING_MCP_TOOLS = {
         "approve_action", "reject_action", "dispatch_action", "delete_draft",
-        "transfer", "send", "revoke", "grant", "write", "set", "drop", "insert", "mutate"
+        "transfer", "send", "revoke", "grant", "write", "set", "drop", "insert", "mutate",
+        "wipe_db", "purge_users", "run_sql", "eval_python", "post_webhook",
     }
     MUTATING_TOOL_PREFIXES = (
         "create_", "update_", "delete_", "approve_", "reject_",
         "modify_", "apply_", "execute_", "remove_", "cancel_", "dispatch_", "patch_",
-        "transfer_", "send_", "revoke_", "grant_", "write_", "set_", "drop_", "insert_", "mutate_"
+        "transfer_", "send_", "revoke_", "grant_", "write_", "set_", "drop_", "insert_", "mutate_",
+        "wipe_", "purge_", "run_", "post_",
     )
 
     @staticmethod
@@ -204,6 +281,9 @@ class StateInvariantGate:
         ):
             return True
         return False
+
+    def try_consume_permit(self, permit_id: str) -> bool:
+        return self.registry.try_consume_permit(permit_id)
 
     def mark_permit_consumed(self, permit_id: str) -> None:
         self.registry.mark_permit_consumed(permit_id)
@@ -278,21 +358,25 @@ class StateInvariantGate:
         permit: Optional[ActionPermit],
         token: CapabilityToken,
         payload: Optional[Any] = None,
+        tenant_id: Optional[str] = None,
     ) -> Optional[SemanticDenialEnvelope]:
         """
         Evaluates causal dependency, hallucination checks, and pre-state drift.
         Returns None if permitted, or a structured SemanticDenialEnvelope if denied.
         """
+        effective_tenant = tenant_id or token.scope.tenant_id
+
+        clean_target = target.split("?")[0].rstrip("/").lower()
+        is_create = (
+            method.upper() == "POST"
+            and not any(act in clean_target for act in (
+                "approve", "reject", "cancel", "submit", "publish", "archive",
+                "lock", "mutate", "transfer", "revoke", "grant", "execute", "apply", "delete", "update", "modify"
+            ))
+        )
+
         # Resolve resource ID from query or payload if not passed explicitly
         if resource_id is None:
-            clean_target = target.split("?")[0].rstrip("/").lower()
-            is_create = (
-                method.upper() == "POST"
-                and not any(act in clean_target for act in (
-                    "approve", "reject", "cancel", "submit", "publish", "archive",
-                    "lock", "mutate", "transfer", "revoke", "grant", "execute", "apply", "delete", "update", "modify"
-                ))
-            )
             if not is_create:
                 resource_id = self.extract_resource_id_from_body_or_query(target, payload)
             elif "?" in target:
@@ -320,19 +404,27 @@ class StateInvariantGate:
         if route_denial is not None:
             return route_denial
 
+        # Fail closed on non-create mutations with unresolved resource_id
+        if resource_id is None and not is_create:
+            logger.warn("hypervisor_unresolved_mutating_resource", method=method, target=target)
+            return DenialEnvelopeFactory.missing_action_permit(
+                action_method=method,
+                resource_id=target,
+            )
+
         # If operation targets a specific resource
         if resource_id is not None:
-            # 1. Hallucination Gate: Check if resource actually exists in backend
-            if not self.registry.has_resource(resource_id):
-                known = self.registry.list_known_resources()
-                logger.warn("hypervisor_hallucinated_resource", resource_id=resource_id, known_count=len(known))
+            # 1. Hallucination Gate: Check if resource actually exists in backend (tenant-scoped)
+            # Never leak resource IDs from other tenants in valid_candidates!
+            if not self.registry.has_resource(resource_id, tenant_id=effective_tenant):
+                logger.warn("hypervisor_hallucinated_resource", resource_id=resource_id, tenant_id=effective_tenant)
                 return DenialEnvelopeFactory.hallucinated_resource_id(
                     resource_id=resource_id,
-                    valid_candidates=known[:5],
+                    valid_candidates=[],
                 )
 
             # 2. Causal Lineage Gate: Verify prior read / inspection occurred in this session
-            if not self.lineage_tracker.has_read_witness(session_id, resource_id):
+            if not self.lineage_tracker.has_read_witness(session_id, resource_id, tenant_id=effective_tenant):
                 logger.warn("hypervisor_lineage_violation", session_id=session_id, resource_id=resource_id, target=target)
                 prereq_paths = [
                     f"GET {target.rsplit('/', 1)[0]}/{resource_id}" if "/" in target else f"inspect_{resource_id}",
@@ -353,7 +445,7 @@ class StateInvariantGate:
                 )
 
             # 4. Pre-State Drift Verification: Ensure permit pre-state witness matches current state
-            current_state_hash = self.registry.get_state_hash(resource_id)
+            current_state_hash = self.registry.get_state_hash(resource_id, tenant_id=effective_tenant)
             permit_denial = self.token_authority.verify_action_permit(
                 permit=permit,
                 token=token,

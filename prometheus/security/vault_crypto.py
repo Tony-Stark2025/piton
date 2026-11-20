@@ -7,12 +7,33 @@ import os
 import base64
 import hashlib
 import logging
+import secrets
 from typing import Optional
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 logger = logging.getLogger("prometheus.security.vault_crypto")
 
-DEFAULT_VAULT_SEED = os.getenv("VAULT_MASTER_KEY", os.getenv("SECRET_KEY", "prometheus-enterprise-master-vault-seed-2026"))
+
+def _resolve_vault_seed() -> str:
+    env_key = os.getenv("VAULT_MASTER_KEY") or os.getenv("SECRET_KEY")
+    if env_key:
+        return env_key
+    if os.getenv("ENVIRONMENT", "").lower() == "production":
+        raise RuntimeError("FATAL: VAULT_MASTER_KEY must be configured in production.")
+    return secrets.token_hex(32)
+
+
+def _resolve_vault_salt() -> bytes:
+    env_salt = os.getenv("VAULT_KDF_SALT")
+    if env_salt:
+        return env_salt.encode("utf-8")
+    if os.getenv("ENVIRONMENT", "").lower() == "production":
+        raise RuntimeError("FATAL: VAULT_KDF_SALT must be configured in production.")
+    return secrets.token_bytes(16)
+
+
+DEFAULT_VAULT_SEED = _resolve_vault_seed()
+DEFAULT_VAULT_SALT = _resolve_vault_salt()
 
 
 class VaultCrypto:
@@ -22,7 +43,7 @@ class VaultCrypto:
 
     def __init__(self, master_key: Optional[str] = None):
         seed = (master_key or DEFAULT_VAULT_SEED).encode("utf-8")
-        salt = os.getenv("VAULT_KDF_SALT", "prometheus-enterprise-kdf-salt-v1").encode("utf-8")
+        salt = os.getenv("VAULT_KDF_SALT").encode("utf-8") if os.getenv("VAULT_KDF_SALT") else DEFAULT_VAULT_SALT
         self._key = hashlib.pbkdf2_hmac("sha256", seed, salt, 100_000, dklen=32)
         self._aesgcm = AESGCM(self._key)
 

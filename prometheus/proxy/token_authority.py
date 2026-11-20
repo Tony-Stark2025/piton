@@ -26,11 +26,18 @@ from prometheus.proxy.denial_envelope import DenialEnvelopeFactory
 
 import secrets
 
-DEFAULT_HYPERVISOR_SECRET = (
-    os.getenv("HYPERVISOR_SECRET_KEY")
-    or os.getenv("VAULT_MASTER_KEY")
-    or secrets.token_hex(32)
-)
+def _resolve_hypervisor_secret() -> str:
+    env_secret = os.getenv("HYPERVISOR_SECRET_KEY") or os.getenv("VAULT_MASTER_KEY")
+    if env_secret:
+        return env_secret
+    if os.getenv("ENVIRONMENT", "").lower() == "production":
+        raise RuntimeError(
+            "FATAL: HYPERVISOR_SECRET_KEY (or VAULT_MASTER_KEY) must be configured in production."
+        )
+    return secrets.token_hex(32)
+
+
+DEFAULT_HYPERVISOR_SECRET = _resolve_hypervisor_secret()
 
 
 class AttenuationViolationError(Exception):
@@ -128,7 +135,7 @@ class TokenAuthority:
         if parent_token.is_expired():
             raise AttenuationViolationError("Cannot attenuate an expired parent token.")
 
-        if tenant_id is not None and parent_token.scope.tenant_id is not None and tenant_id != parent_token.scope.tenant_id:
+        if parent_token.scope.tenant_id is not None and tenant_id is not None and tenant_id != parent_token.scope.tenant_id:
             raise AttenuationViolationError(
                 f"Tenant escalation forbidden: cannot switch tenant from '{parent_token.scope.tenant_id}' to '{tenant_id}'."
             )
@@ -178,7 +185,7 @@ class TokenAuthority:
         child_expires_at = min(now + child_ttl, parent_token.scope.expires_at)
         child_id = f"tok_{uuid.uuid4().hex[:16]}"
 
-        effective_tenant_id = tenant_id if tenant_id is not None else parent_token.scope.tenant_id
+        effective_tenant_id = parent_token.scope.tenant_id if parent_token.scope.tenant_id is not None else tenant_id
         child_scope = ScopeBoundary(
             allowed_methods=effective_methods,
             allowed_resource_ids=effective_resources,
@@ -247,15 +254,14 @@ class TokenAuthority:
                 scope=token.scope,
             )
 
-        if tenant_id is not None and token.scope.tenant_id is not None and token.scope.tenant_id != tenant_id:
+        if token.scope.tenant_id is not None and (tenant_id is None or token.scope.tenant_id != tenant_id):
             return SemanticDenialEnvelope(
                 denied=True,
                 denial_code=DenialCode.UNAUTHORIZED_RESOURCE_SCOPE,
-                violated_invariant=f"TenantConfinementViolation: Target tenant '{tenant_id}' outside granted boundary '{token.scope.tenant_id}'.",
-                details=f"Token is confined to tenant '{token.scope.tenant_id}', but operation targeted '{tenant_id}'.",
+                violated_invariant="TenantConfinementViolation: Request tenant missing or outside granted boundary.",
+                details="Token is tenant-confined; request must supply matching tenant context.",
                 permitted_alternate_paths=[],
-                scope_boundary=token.scope,
-                suggested_recovery_step=f"Obtain a capability token for tenant '{tenant_id}'.",
+                suggested_recovery_step="Supply a matching tenant context or obtain an appropriately scoped capability token.",
                 timestamp=time.time(),
             )
 
