@@ -339,3 +339,97 @@ async def test_cegis_verifier_never_fakes_remote_403_200():
 def test_mcp_server_defaults_fail_closed():
     srv = PrometheusMCPServer()
     assert srv.enforce_hypervisor is True
+
+
+def test_in_vpc_rfc1918_opt_in_still_blocks_cloud_metadata():
+    from prometheus.pentest.exploit_prober import validate_ssrf, SSRFValidationError
+
+    # Default blocks RFC1918
+    with pytest.raises(SSRFValidationError):
+        validate_ssrf("http://10.0.1.50:8000/openapi.json", allow_loopback=True, allow_private_vpc=False)
+
+    # Opt-in In-VPC staging allows RFC1918
+    validate_ssrf("http://10.0.1.50:8000/openapi.json", allow_loopback=True, allow_private_vpc=True)
+
+    # Cloud metadata is ALWAYS blocked even in In-VPC mode
+    with pytest.raises(SSRFValidationError):
+        validate_ssrf("http://169.254.169.254/latest/meta-data/", allow_loopback=True, allow_private_vpc=True)
+
+
+def test_proof_validator_strips_caller_reflection_and_noop_mutations():
+    from prometheus.pentest.proof_validator import ProofValidator
+    from prometheus.pentest.models import ExploitProbeRequest
+
+    validator = ProofValidator()
+    # Echoing attacker-supplied URL param must NOT trigger BOLA FP
+    probe_get = ExploitProbeRequest(
+        target_url="http://api.test/v1/orgs/org-alpha-victim-001",
+        method=HttpMethod.GET,
+        headers={"X-Tenant-ID": "org-beta"},
+        path_params={"org_id": "org-alpha-victim-001"},
+        query_params={},
+        vector=VulnerabilityCategory.BOLA_IDOR,
+        hypothesis="test",
+    )
+    res_reflect = validator.evaluate_bola_response(
+        probe=probe_get,
+        status_code=200,
+        response_body={"status": "ok", "requested_org": "org-alpha-victim-001"},
+        expected_victim_marker="org-alpha-victim-001",
+    )
+    assert res_reflect.is_vulnerable is False
+
+    # No-op 200 OK mutation {'updated': 0} must NOT trigger BOLA FP
+    probe_put = ExploitProbeRequest(
+        target_url="http://api.test/v1/invoices/inv-99",
+        method=HttpMethod.PUT,
+        headers={"X-Tenant-ID": "org-beta"},
+        path_params={},
+        query_params={},
+        body={"amount": 1},
+        vector=VulnerabilityCategory.BOLA_IDOR,
+        hypothesis="test",
+    )
+    res_noop = validator.evaluate_bola_response(
+        probe=probe_put,
+        status_code=200,
+        response_body={"updated": 0},
+    )
+    assert res_noop.is_vulnerable is False
+
+
+def test_openapi_ref_and_allof_dereferencing():
+    from prometheus.pentest.pr_ingestor import OpenAPIngestor
+
+    spec = {
+        "openapi": "3.0.3",
+        "paths": {
+            "/api/v1/invoices": {
+                "post": {
+                    "requestBody": {
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/InvoiceCreate"}
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "components": {
+            "schemas": {
+                "BaseDoc": {"type": "object", "properties": {"tenant_id": {"type": "string"}}},
+                "InvoiceCreate": {
+                    "allOf": [
+                        {"$ref": "#/components/schemas/BaseDoc"},
+                        {"type": "object", "properties": {"amount_cents": {"type": "integer"}}},
+                    ]
+                },
+            }
+        },
+    }
+    endpoints = OpenAPIngestor.parse_spec(spec)
+    assert len(endpoints) == 1
+    props = endpoints[0].request_body_schema["properties"]
+    assert "tenant_id" in props and "amount_cents" in props
+
