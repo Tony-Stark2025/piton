@@ -1,0 +1,248 @@
+"""
+Unified Prometheus Control Loop CLI (`prometheus`).
+
+Commands:
+- `prometheus init [--repo .]` — Scan repo MCP configs & env templates, run Day-1 poisoning lint,
+  and generate `prometheus.yaml` (shadow mode), `prometheus.lock`, and `.env.agent`.
+- `prometheus lock [--diff | --update] [--manifest <json>]` — Verify or update split-hash MCP pins
+  with GitHub PR-ready markdown diff output for CI gates.
+- `prometheus replay --config prometheus.yaml --traces .prometheus/traces.jsonl [--simulate-enforce]`
+  — Replay recorded shadow traces against candidate policies to reach 0% false blocks before enforcement.
+- `prometheus ledger-verify --traces .prometheus/traces.jsonl` — Verify HMAC chain integrity of
+  the version-pinned decision ledger.
+- `prometheus top --traces .prometheus/traces.jsonl` — Stream/display live flight-recorder events.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+import time
+from typing import Any, Dict, List, Optional
+
+from prometheus.iac.lockfile import (
+    build_lockfile_from_servers,
+    detect_cross_server_shadowing,
+    diff_lockfiles,
+    render_diff_markdown,
+    verify_tools_list,
+)
+from prometheus.iac.scanner import scan_repository, write_init_artifacts
+from prometheus.iac.replay import SignedDecisionLedger, replay_traces
+from prometheus.iac.schema import AgentIaCConfig, ManifestLockfile, TrustTier
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    repo = Path(args.repo).resolve()
+    live_tools: Optional[Dict[str, List[Dict[str, Any]]]] = None
+    if args.manifest:
+        live_tools = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+
+    res = scan_repository(
+        repo_root=repo,
+        agent_id=args.agent_id,
+        owner=args.owner,
+        live_server_tools=live_tools,
+        allow_poisoned=args.allow_poisoned,
+    )
+    paths = write_init_artifacts(repo, res)
+
+    print(f"Prometheus initialized for agent '{res.config.agent.id}' (mode={res.config.agent.mode.value})")
+    print(f"  Discovered files: {', '.join(res.discovered_files) or 'none'}")
+    for label, p in paths.items():
+        print(f"  Wrote {label}: {p}")
+
+    if res.poisoning_findings:
+        print(f"\n[!] Day-1 MCP Poisoning Linter flagged {len(res.poisoning_findings)} finding(s):")
+        for f in res.poisoning_findings:
+            print(f"  - [{f.severity.value.upper()}] {f.server_name}.{f.tool_name} ({f.rule_id}): {f.message}")
+        if not args.allow_poisoned:
+            print("  Quarantined CRITICAL/HIGH tools were excluded from prometheus.lock.")
+            return 2
+    return 0
+
+
+def _cmd_lock(args: argparse.Namespace) -> int:
+    lock_path = Path(args.lockfile)
+    config_path = Path(args.config)
+    manifest_data: Dict[str, List[Dict[str, Any]]] = json.loads(
+        Path(args.manifest).read_text(encoding="utf-8")
+    )
+
+    config = AgentIaCConfig.load_file(config_path) if config_path.is_file() else None
+    servers_for_lock = {}
+    for srv_name, tools in manifest_data.items():
+        trust = (
+            config.mcp_servers[srv_name].trust_tier
+            if config and srv_name in config.mcp_servers
+            else TrustTier.THIRD_PARTY
+        )
+        url = config.mcp_servers[srv_name].url if config and srv_name in config.mcp_servers else None
+        servers_for_lock[srv_name] = (trust, url, tools)
+
+    shadowing = detect_cross_server_shadowing(manifest_data)
+    if args.update:
+        new_lock, findings = build_lockfile_from_servers(servers_for_lock, allow_poisoned=args.allow_poisoned)
+        new_lock.save_file(lock_path)
+        print(f"Updated {lock_path} (sha256={new_lock.canonical_sha256()[:16]}...)")
+        if findings:
+            print(f"Poisoning warnings/quarantined items: {len(findings)}")
+        return 0
+
+    if not lock_path.is_file():
+        print(f"Error: lockfile not found at {lock_path}. Run `prometheus init` first.", file=sys.stderr)
+        return 1
+
+    existing_lock = ManifestLockfile.load_file(lock_path)
+
+    if args.diff:
+        new_lock, _ = build_lockfile_from_servers(servers_for_lock, allow_poisoned=True)
+        diff_res = diff_lockfiles(existing_lock, new_lock)
+        diff_res.drifts.extend(shadowing)
+        diff_res.blocked_count += len(shadowing)
+        diff_res.passed = diff_res.blocked_count == 0
+        print(render_diff_markdown(diff_res))
+        return 0 if diff_res.passed else 1
+
+    # Live/CI verification mode
+    all_passed = len(shadowing) == 0
+    for s in shadowing:
+        print(f"[BLOCK] {s.message}")
+    for srv_name, tools in manifest_data.items():
+        res = verify_tools_list(existing_lock, srv_name, tools)
+        if not res.passed:
+            all_passed = False
+        print(render_diff_markdown(res))
+    return 0 if all_passed else 1
+
+
+def _cmd_replay(args: argparse.Namespace) -> int:
+    config = AgentIaCConfig.load_file(Path(args.config))
+    signing_key = os.getenv("PROMETHEUS_LEDGER_SIGNING_KEY", "prometheus-ledger-signing-key").encode("utf-8")
+    ledger = SignedDecisionLedger(Path(args.traces), signing_key=signing_key)
+    records = ledger.load_records()
+    report = replay_traces(config, records, simulate_enforce=args.simulate_enforce)
+
+    if args.json:
+        print(report.model_dump_json(indent=2))
+    else:
+        print(f"Prometheus Policy Replay — agent='{config.agent.id}' (simulate_enforce={args.simulate_enforce})")
+        print(f"  Replayed calls:        {report.total_replayed}")
+        print(f"  Allowed:               {report.allowed_count}")
+        print(f"  Blocked / Escalated:   {report.blocked_or_escalated_count} ({report.false_block_rate_pct}%)")
+        print(f"  Ready to enforce:      {'YES' if report.ready_to_enforce else 'NO'}")
+        if report.suggestions:
+            print("\nCalibration Suggestions:")
+            for s in report.suggestions:
+                print(f"  - [{s.rule_id}] {s.server_name}.{s.tool_name}: {s.suggestion}")
+
+    return 0 if report.ready_to_enforce or not args.strict else 1
+
+
+def _cmd_ledger_verify(args: argparse.Namespace) -> int:
+    signing_key = os.getenv("PROMETHEUS_LEDGER_SIGNING_KEY", "prometheus-ledger-signing-key").encode("utf-8")
+    ledger = SignedDecisionLedger(Path(args.traces), signing_key=signing_key)
+    ok, err = ledger.verify_chain()
+    if ok:
+        print(f"Ledger integrity VERIFIED ({len(ledger.load_records())} chained records).")
+        return 0
+    print(f"Ledger integrity FAILED: {err}", file=sys.stderr)
+    return 1
+
+
+def _cmd_top(args: argparse.Namespace) -> int:
+    traces_path = Path(args.traces)
+    if not traces_path.is_file():
+        print(f"No trace ledger found at {traces_path} yet.")
+        return 0
+
+    lines = traces_path.read_text(encoding="utf-8").splitlines()
+    recent = lines[-args.limit :]
+    print(f"{'VERDICT':<14} {'SERVER.TOOL':<32} {'LATENCY':>9}  {'TRACEPARENT':<24}  {'DETAILS'}")
+    print("-" * 105)
+    for raw in recent:
+        if not raw.strip():
+            continue
+        rec = json.loads(raw)
+        verdict = str(rec.get("verdict", "")).upper()
+        st = f"{rec.get('server_name', '')}.{rec.get('tool_name', '')}"[:31]
+        lat = f"{rec.get('latency_ms', 0.0):.1f}ms"
+        tp = str(rec.get("traceparent", ""))[:23]
+        viols = rec.get("violations") or []
+        detail = viols[0]["rule_id"] if viols else "ok"
+        print(f"{verdict:<14} {st:<32} {lat:>9}  {tp:<24}  {detail}")
+
+    if args.follow:
+        with traces_path.open("r", encoding="utf-8") as fh:
+            fh.seek(0, os.SEEK_END)
+            try:
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        time.sleep(0.25)
+                        continue
+                    rec = json.loads(line)
+                    print(
+                        f"{str(rec.get('verdict', '')).upper():<14} "
+                        f"{rec.get('server_name', '')}.{rec.get('tool_name', ''):<20} "
+                        f"{rec.get('latency_ms', 0.0):.1f}ms"
+                    )
+            except KeyboardInterrupt:
+                pass
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="prometheus",
+        description="Prometheus Agent Control Loop — MCP Manifest Pinning, Shadow Policy Replay & Signed Audit Ledgers",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_init = sub.add_parser("init", help="Scan repo MCP configs & env templates to generate prometheus.yaml & prometheus.lock")
+    p_init.add_argument("--repo", default=".", help="Repository path to scan")
+    p_init.add_argument("--agent-id", default=None, help="Explicit agent ID")
+    p_init.add_argument("--owner", default="platform-team@example.com", help="Owning team email")
+    p_init.add_argument("--manifest", default=None, help="Optional JSON file mapping server_name -> tools/list array")
+    p_init.add_argument("--allow-poisoned", action="store_true", help="Include tools even if poisoning lint flags them")
+    p_init.set_defaults(func=_cmd_init)
+
+    p_lock = sub.add_parser("lock", help="Verify, diff, or update prometheus.lock MCP pins")
+    p_lock.add_argument("--manifest", required=True, help="JSON file mapping server_name -> observed tools/list array")
+    p_lock.add_argument("--lockfile", default="prometheus.lock")
+    p_lock.add_argument("--config", default="prometheus.yaml")
+    p_lock.add_argument("--diff", action="store_true", help="Render PR-ready markdown diff against existing lockfile")
+    p_lock.add_argument("--update", action="store_true", help="Update prometheus.lock with observed manifests")
+    p_lock.add_argument("--allow-poisoned", action="store_true")
+    p_lock.set_defaults(func=_cmd_lock)
+
+    p_replay = sub.add_parser("replay", help="Replay recorded shadow traces against candidate prometheus.yaml")
+    p_replay.add_argument("--config", default="prometheus.yaml")
+    p_replay.add_argument("--traces", default=".prometheus/traces.jsonl")
+    p_replay.add_argument("--simulate-enforce", action="store_true", default=True)
+    p_replay.add_argument("--strict", action="store_true", help="Exit non-zero if any calls would be blocked")
+    p_replay.add_argument("--json", action="store_true", help="Output JSON report")
+    p_replay.set_defaults(func=_cmd_replay)
+
+    p_verify = sub.add_parser("ledger-verify", help="Verify HMAC chain integrity of a signed decision ledger")
+    p_verify.add_argument("--traces", default=".prometheus/traces.jsonl")
+    p_verify.set_defaults(func=_cmd_ledger_verify)
+
+    p_top = sub.add_parser("top", help="Flight recorder view of recent/live agent tool decisions")
+    p_top.add_argument("--traces", default=".prometheus/traces.jsonl")
+    p_top.add_argument("--limit", type=int, default=25)
+    p_top.add_argument("--follow", "-f", action="store_true")
+    p_top.set_defaults(func=_cmd_top)
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

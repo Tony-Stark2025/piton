@@ -24,6 +24,7 @@ dependencies = [
     "uvicorn>=0.28.0",
     "google-genai>=0.1.1",
     "psutil>=5.9.0",
+    "pyyaml>=6.0.1",
 ]
 
 [project.optional-dependencies]
@@ -33,6 +34,7 @@ dev = [
 ]
 
 [project.scripts]
+prometheus = "prometheus.cli:main"
 prometheus-scan = "prometheus.cli_scan:main"
 
 [tool.setuptools.packages.find]
