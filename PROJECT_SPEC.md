@@ -1,4 +1,4 @@
-# Prometheus: System Architecture & Technical Specification
+# Piton: System Architecture & Technical Specification
 ## Autonomous Adversarial Security & Closed-Loop Remediation Engine
 
 **Document Version:** 2.5.0 (Production Architecture Edition)  
@@ -16,14 +16,14 @@ The emergence of frontier reasoning models, work super-agents (Google Cloud Gemi
 2. **Model-Agnostic In-VPC Execution vs. Single-Vendor Lock-In:** While frontier AI labs offer specialized cyber models and agents (such as OpenAI Aardvark or enterprise-authorized offensive models), enterprises require a **model-agnostic, in-VPC execution and remediation fabric** that runs across their heterogeneous clouds, connects to their internal staging networks with strict blast-radius guarantees, and routes across the best reasoning models (Gemini, Claude, GPT, DeepSeek) without vendor lock-in.
 3. **The Failure of Classical Program Repair:** Deterministic AST/regex patching fails in real-world codebases because authorization, business logic, and sanitization belong in multi-file architectural layers (middleware, ORM scopes, policy guards, decorators), not inline controller statements.
 
-### 1.2 The Prometheus Value Proposition
-Prometheus is an **Autonomous Adversarial Security & Closed-Loop Remediation Engine**:
+### 1.2 The Piton Value Proposition
+Piton is an **Autonomous Adversarial Security & Closed-Loop Remediation Engine**:
 
-> **"Prometheus executes unconstrained, glass-box offensive exploration against staging and preview environments, proves vulnerabilities across the full spectrum (injections, race conditions, business logic flaws), synthesizes contextual, idiomatic pull requests that pass native compilers and linters, and continuously neutralizes emerging zero-days within hours of public disclosure."**
+> **"Piton executes unconstrained, glass-box offensive exploration against staging and preview environments, proves vulnerabilities across the full spectrum (injections, race conditions, business logic flaws), synthesizes contextual, idiomatic pull requests that pass native compilers and linters, and continuously neutralizes emerging zero-days within hours of public disclosure."**
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                                 THE PROMETHEUS FABRIC                                  │
+│                                 THE PITON FABRIC                                  │
 │                                                                                        │
 │   [ Event Trigger ] ──► [ Glass-Box Recon ] ──► [ Unconstrained ReAct ]                │
 │     • PR / Staging        (Source + Live Env)     (Shrewd Hacker Agent)                │
@@ -122,7 +122,7 @@ flowchart TD
 │   [ Git Repository ]        ◄──┐   │                                                   │
 │                                │   │                                                   │
 │   ┌────────────────────────────┴───┴───────────────────────────────────────────────┐   │
-│   │               PROMETHEUS IN-VPC WORKER (Stateless K8s Pod / Docker)             │   │
+│   │               PITON IN-VPC WORKER (Stateless K8s Pod / Docker)             │   │
 │   │                                                                                │   │
 │   │  ┌───────────────────────┐  ┌───────────────────────┐  ┌────────────────────┐  │   │
 │   │  │ ReAct Offensive Core  │  │ Safe-Exploit Egress   │  │ Contextual SWE     │  │   │
@@ -133,7 +133,7 @@ flowchart TD
                                              │ gRPC / TLS (Metadata, Diff & Proof Only)
                                              ▼
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                              PROMETHEUS CLOUD (Control Plane)                          │
+│                              PITON CLOUD (Control Plane)                          │
 │                                                                                        │
 │  ┌──────────────────────┐  ┌───────────────────────┐  ┌─────────────────────────────┐  │
 │  │ Tiered Model Router  │  │ OOB Canary Listener   │  │ Threat Intel Harvester      │  │
@@ -178,22 +178,22 @@ To eliminate negative gross margins caused by unconstrained LLM calls:
 
 ## 4. Super-Agent Interoperability (MCP & Agent Gateway)
 
-Prometheus does not fight the emergence of enterprise super-agents (Google Cloud Gemini Agent, DeepSeek Super-Agent, Claude Code); it powers them.
+Piton does not fight the emergence of enterprise super-agents (Google Cloud Gemini Agent, DeepSeek Super-Agent, Claude Code); it powers them.
 
 ```mermaid
 graph TD
     User["Developer / CISO"] --> SuperAgent["Enterprise Super Agent<br/>(GCP Gemini Agent / Claude Code / DeepSeek)"]
-    SuperAgent -->|MCP / Agent Gateway| PromServer["Prometheus MCP Capability Server"]
-    PromServer --> Worker["Prometheus In-VPC Adversarial Kernel"]
+    SuperAgent -->|MCP / Agent Gateway| PromServer["Piton MCP Capability Server"]
+    PromServer --> Worker["Piton In-VPC Adversarial Kernel"]
     Worker -->|Proof & Certified Patch| SuperAgent
     SuperAgent -->|Unified Review & Merge| User
 ```
 
-### The Prometheus Model Context Protocol (MCP) Interface
+### The Piton Model Context Protocol (MCP) Interface
 Exposes specialized adversarial tools directly to host super-agents:
-* `tools/call -> prometheus_verify_exposure(target_url, cve_id_or_vector)`: Deploys the sandboxed prober to verify if an endpoint is exploitable.
-* `tools/call -> prometheus_generate_poc(target_url, endpoint, vector)`: Produces a standalone, reproducible Python or cURL PoC.
-* `tools/call -> prometheus_synthesize_patch(repo_path, exploit_trace)`: Dispatches the Contextual SWE Agent to draft an idiomatic patch and regression test suite.
+* `tools/call -> piton_verify_exposure(target_url, cve_id_or_vector)`: Deploys the sandboxed prober to verify if an endpoint is exploitable.
+* `tools/call -> piton_generate_poc(target_url, endpoint, vector)`: Produces a standalone, reproducible Python or cURL PoC.
+* `tools/call -> piton_synthesize_patch(repo_path, exploit_trace)`: Dispatches the Contextual SWE Agent to draft an idiomatic patch and regression test suite.
 
 ---
 
@@ -302,7 +302,7 @@ Exposes specialized adversarial tools directly to host super-agents:
 
 ```mermaid
 gantt
-    title Prometheus 2.5 Implementation Horizon
+    title Piton 2.5 Implementation Horizon
     dateFormat  YYYY-MM-DD
     section Core Engine
     Dismantle Rigid DAG -> ReAct Loop          :done, 2026-11-04, 5d
@@ -318,7 +318,7 @@ gantt
 ```
 
 ### Phase 1: ReAct Engine & Glass-Box Exploration
-* Strip fixed sequential DAG states from `prometheus/pentest/engine.py`.
+* Strip fixed sequential DAG states from `piton/pentest/engine.py`.
 * Implement unconstrained ReAct loop with multi-turn self-validation.
 * Integrate Tree-Sitter AST inspection with live Playwright and raw HTTP sessions.
 
@@ -331,5 +331,5 @@ gantt
 * Build the Event-Driven Threat Ingestion pipeline connecting to NVD and The Hacker News RSS/APIs.
 
 ### Phase 4: Super-Agent MCP Protocol & Enterprise Runner
-* Expose the Prometheus offensive kernel over Model Context Protocol (MCP) for seamless invocation by GCP Gemini Agent and Claude Code.
+* Expose the Piton offensive kernel over Model Context Protocol (MCP) for seamless invocation by GCP Gemini Agent and Claude Code.
 * Package the stateless In-VPC Runner (Helm chart / GitHub Action).

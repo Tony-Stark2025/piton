@@ -8,13 +8,13 @@ import json
 import pytest
 import httpx
 
-from prometheus.pentest.engine import PrometheusAdversarialEngine
-from prometheus.pentest.exploit_prober import ExploitProber
-from prometheus.pentest.models import Severity, VulnerabilityCategory
-from prometheus.pentest.pr_ingestor import OpenAPIngestor
-from prometheus.pentest.pr_reporter import PRReporter
-from prometheus.pentest.proof_validator import ProofValidator
-from prometheus.pentest.state_synthesizer import StateSynthesizer
+from piton.pentest.engine import PitonAdversarialEngine
+from piton.pentest.exploit_prober import ExploitProber
+from piton.pentest.models import Severity, VulnerabilityCategory
+from piton.pentest.pr_ingestor import OpenAPIngestor
+from piton.pentest.pr_reporter import PRReporter
+from piton.pentest.proof_validator import ProofValidator
+from piton.pentest.state_synthesizer import StateSynthesizer
 from tests.fixtures.crapi_benchmark_app import crapi_app, DEFAULT_JWT_SECRET
 
 
@@ -56,7 +56,7 @@ async def test_crapi_benchmark_scan_and_dual_pass_neutralization():
     )
 
     # 4. Execute Autonomous Adversarial Reasoning Loop
-    engine = PrometheusAdversarialEngine(
+    engine = PitonAdversarialEngine(
         base_url="http://crapiserver",
         endpoints=endpoints,
         context=context,
@@ -90,7 +90,7 @@ async def test_crapi_benchmark_scan_and_dual_pass_neutralization():
     assert "<AUTH_TOKEN_REDACTED>" in bola_vuln.curl_command
 
     pr_comment = PRReporter.format_github_pr_comment(bola_vuln)
-    assert "🚨 Prometheus Security Gate: CRITICAL Exploit Verified" in pr_comment
+    assert "🚨 Piton Security Gate: CRITICAL Exploit Verified" in pr_comment
     assert context.tenant_beta.jwt_token not in pr_comment
 
     # Check BFLA detection on mechanic orders

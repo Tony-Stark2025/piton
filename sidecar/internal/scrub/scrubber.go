@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const RedactionMarker = "[REDACTED_BY_PROMETHEUS]"
+const RedactionMarker = "[REDACTED_BY_PITON]"
 
 // SlidingWindowScrubber scrubs active secrets (raw, base64, URL-encoded, and JSON-escaped
 // variants) from streaming HTTP / SSE response bodies while holding back `maxSecretLen - 1`

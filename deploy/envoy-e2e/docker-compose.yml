@@ -8,20 +8,20 @@ services:
     ports:
       - "19001:9001"
 
-  prometheus-sidecar:
+  piton-sidecar:
     build:
       context: ../../sidecar
       dockerfile: Dockerfile
     depends_on:
       - upstream-mcp
     environment:
-      PROMETHEUS_LEDGER_SIGNING_KEY: "envoy-e2e-signing-key-32-bytes-minimum"
+      PITON_LEDGER_SIGNING_KEY: "envoy-e2e-signing-key-32-bytes-minimum"
     volumes:
-      - ./runtime_policy.json:/etc/prometheus/runtime_policy.json:ro
-      - ./prometheus.lock:/etc/prometheus/prometheus.lock:ro
+      - ./runtime_policy.json:/etc/piton/runtime_policy.json:ro
+      - ./piton.lock:/etc/piton/piton.lock:ro
     command:
-      - "--policy=/etc/prometheus/runtime_policy.json"
-      - "--lock=/etc/prometheus/prometheus.lock"
+      - "--policy=/etc/piton/runtime_policy.json"
+      - "--lock=/etc/piton/piton.lock"
       - "--traces=/tmp/traces.jsonl"
       - "--addr=0.0.0.0:8080"
       - "--grpc-addr=0.0.0.0:50051"
@@ -32,7 +32,7 @@ services:
   envoy:
     image: envoyproxy/envoy:v1.33-latest
     depends_on:
-      - prometheus-sidecar
+      - piton-sidecar
       - upstream-mcp
     volumes:
       - ./envoy.yaml:/etc/envoy/envoy.yaml:ro

@@ -1,7 +1,7 @@
 """
-Live Envoy Proxy v1.33 <-> Prometheus Go Sidecar (`ext_proc` gRPC) Wire Verification.
+Live Envoy Proxy v1.33 <-> Piton Go Sidecar (`ext_proc` gRPC) Wire Verification.
 
-Sends real HTTP/1.1 requests through Envoy (:10000), which invokes prometheus-sidecar
+Sends real HTTP/1.1 requests through Envoy (:10000), which invokes piton-sidecar
 over HTTP/2 gRPC `envoy.service.ext_proc.v3.ExternalProcessor` (:50051) before and after
 proxying to upstream-mcp (:9001).
 
@@ -61,7 +61,7 @@ def wait_for_ready():
         except Exception:
             pass
         time.sleep(0.5)
-    raise RuntimeError("Envoy + prometheus-sidecar did not become ready within 30s")
+    raise RuntimeError("Envoy + piton-sidecar did not become ready within 30s")
 
 
 def sign_mrtr_approval(request_state: str) -> str:
@@ -139,7 +139,7 @@ def main():
         {
             **base_headers,
             "Idempotency-Key": "envoy-e2e-mrtr-1",
-            "X-Prometheus-MRTR-Approval": approval_token,
+            "X-Piton-MRTR-Approval": approval_token,
         },
     )
     assert code == 200 and "content" in body.get("result", {}), f"Approved MRTR retry failed: {code} {body}"
@@ -154,8 +154,8 @@ def main():
     # 6. Check sidecar /metrics exposition
     with urllib.request.urlopen(SIDECAR_METRICS, timeout=3) as r:
         metrics_text = r.read().decode("utf-8")
-        assert "prometheus_sidecar_rug_pulls_blocked_total 1" in metrics_text, f"Missing rugpull metric:\n{metrics_text}"
-        assert "prometheus_sidecar_mrtr_escalated_total 1" in metrics_text, f"Missing MRTR metric:\n{metrics_text}"
+        assert "piton_sidecar_rug_pulls_blocked_total 1" in metrics_text, f"Missing rugpull metric:\n{metrics_text}"
+        assert "piton_sidecar_mrtr_escalated_total 1" in metrics_text, f"Missing MRTR metric:\n{metrics_text}"
     print("[PASS] 6. Sidecar /metrics accurately recorded rug-pull block and MRTR escalation")
 
 

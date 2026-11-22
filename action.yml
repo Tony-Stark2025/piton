@@ -10,13 +10,13 @@ inputs:
     required: false
     default: "."
   config:
-    description: "Path to piton.yaml or prometheus.yaml (auto-detected if omitted)"
+    description: "Path to piton.yaml (defaults to piton.yaml)"
     required: false
-    default: ""
+    default: "piton.yaml"
   lockfile:
-    description: "Path to piton.lock or prometheus.lock (auto-detected if omitted)"
+    description: "Path to piton.lock (defaults to piton.lock)"
     required: false
-    default: ""
+    default: "piton.lock"
   manifest:
     description: "Path to observed MCP tools/list JSON manifest (optional when probe=true)"
     required: false
@@ -71,12 +71,8 @@ runs:
         if [ "${{ inputs.scan-only }}" != "true" ]; then
           CFG="${{ inputs.config }}"
           LOCK="${{ inputs.lockfile }}"
-          if [ -z "${CFG}" ]; then
-            if [ -f "piton.yaml" ]; then CFG="piton.yaml"; else CFG="prometheus.yaml"; fi
-          fi
-          if [ -z "${LOCK}" ]; then
-            if [ -f "piton.lock" ]; then LOCK="piton.lock"; else LOCK="prometheus.lock"; fi
-          fi
+          if [ -z "${CFG}" ]; then CFG="piton.yaml"; fi
+          if [ -z "${LOCK}" ]; then LOCK="piton.lock"; fi
 
           CMD=(piton lock --config "${CFG}" --lockfile "${LOCK}" --repo "${{ inputs.repo }}" --diff)
           if [ "${{ inputs.probe }}" = "true" ]; then

@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Prometheus: Deployment to Gemini Enterprise Agent Platform (Agent Engine)
+# Piton: Deployment to Gemini Enterprise Agent Platform (Agent Engine)
 # Production Deployment Automation for Google Cloud Vertex AI & Cloud Run
 # ==============================================================================
 
 set -euo pipefail
 
 # Configuration
-AGENT_NAME="prometheus-chief-of-staff"
+AGENT_NAME="piton-chief-of-staff"
 REGION="${GCP_REGION:-us-central1}"
 PROJECT_ID="${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || echo '')}"
 MODEL_NAME="gemini-3.7-flash"
 
 echo "=============================================================================="
-echo " 🚀 Deploying Prometheus Multi-Agent Fleet to Gemini Enterprise Agent Engine"
+echo " 🚀 Deploying Piton Multi-Agent Fleet to Gemini Enterprise Agent Engine"
 echo "=============================================================================="
 
 if [ -z "$PROJECT_ID" ]; then
@@ -46,7 +46,7 @@ gcloud ai custom-jobs create \
 
 echo ""
 echo "=============================================================================="
-echo " ✨ Prometheus Successfully Configured on Gemini Enterprise Agent Engine!"
+echo " ✨ Piton Successfully Configured on Gemini Enterprise Agent Engine!"
 echo " 🏛️ Platform      : Gemini Enterprise Agent Platform (Agent Engine)"
 echo " 🤖 Unified Model : $MODEL_NAME (Vertex AI)"
 echo " 🛡️ Security Engine: Model Armor + Deterministic ABAC Isolation"

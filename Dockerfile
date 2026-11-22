@@ -1,4 +1,4 @@
-# Multi-stage Dockerfile for Prometheus Multi-Agent Orchestration Platform
+# Multi-stage Dockerfile for Piton Multi-Agent Orchestration Platform
 # Stage 1: Build stage
 FROM python:3.11-slim AS builder
 
@@ -40,4 +40,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:${PORT}/healthz || exit 1
 
-CMD exec uvicorn prometheus.main:app --host 0.0.0.0 --port ${PORT}
+CMD exec uvicorn piton.main:app --host 0.0.0.0 --port ${PORT}

@@ -8,10 +8,10 @@ Unit tests for Sprint 2 Live CEGIS Loop & Dynamic AI Fallback:
 from unittest.mock import AsyncMock, MagicMock
 import pytest
 
-from prometheus.pentest.ast_patcher import ASTPatchSynthesizer
-from prometheus.pentest.cegis_verifier import DualPassVerifier
-from prometheus.pentest.engine import PrometheusAdversarialEngine
-from prometheus.pentest.models import ExploitProof, HttpMethod, RouteEndpoint, Severity, VulnerabilityCategory
+from piton.pentest.ast_patcher import ASTPatchSynthesizer
+from piton.pentest.cegis_verifier import DualPassVerifier
+from piton.pentest.engine import PitonAdversarialEngine
+from piton.pentest.models import ExploitProof, HttpMethod, RouteEndpoint, Severity, VulnerabilityCategory
 
 
 @pytest.mark.asyncio
@@ -66,7 +66,7 @@ def test_locate_target_file_for_route_finds_real_source():
         method=HttpMethod.GET,
         path_parameters=["invoice_id"],
     )
-    rel_path, content = PrometheusAdversarialEngine._locate_target_file_for_route(route)
+    rel_path, content = PitonAdversarialEngine._locate_target_file_for_route(route)
     assert "benchmark_app.py" in rel_path
     assert "/api/v1/invoices/{invoice_id}" in content
 

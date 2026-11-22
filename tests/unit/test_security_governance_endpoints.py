@@ -1,13 +1,13 @@
 """
-Unit and Integration Tests for Prometheus Enterprise Security & Capability Governance REST & MCP Endpoints.
+Unit and Integration Tests for Piton Security & Capability Governance REST & MCP Endpoints.
 Verifies /api/v1/security/overview, /api/v1/proxy/* endpoints, /api/v1/pentest/scan, and MCP hypervisor tools.
 """
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
-from prometheus.main import app
-from prometheus.proxy.token_authority import TokenAuthority
+from piton.main import app
+from piton.proxy.token_authority import TokenAuthority
 
 
 @pytest.fixture
@@ -32,7 +32,7 @@ async def test_security_overview_endpoint(test_client):
 
 @pytest.mark.asyncio
 async def test_proxy_mint_token_and_permit_endpoints(test_client):
-    from prometheus.main import mcp_server
+    from piton.main import mcp_server
 
     # 1. Mint capability token via REST (scoped to explicit resource and caller's authenticated tenant)
     mint_payload = {
@@ -117,7 +117,7 @@ async def test_proxy_execute_tool_interception(test_client):
 
 @pytest.mark.asyncio
 async def test_mcp_security_tools_integration(test_client):
-    from prometheus.main import mcp_server
+    from piton.main import mcp_server
 
     # 1. Test tools/list exposes new security tools
     list_res = await test_client.post("/mcp/sse", json={
@@ -167,7 +167,7 @@ async def test_mcp_security_tools_integration(test_client):
 @pytest.mark.asyncio
 async def test_pentest_scan_endpoint_on_benchmark_app(test_client):
     # Run scan against benchmark app OpenAPI spec
-    from prometheus.pentest.benchmark_app import app as bench_app
+    from piton.pentest.benchmark_app import app as bench_app
     bench_spec = bench_app.openapi()
 
     scan_payload = {
@@ -179,7 +179,7 @@ async def test_pentest_scan_endpoint_on_benchmark_app(test_client):
     from httpx import ASGITransport
     bench_transport = ASGITransport(app=bench_app)
 
-    from prometheus.pentest.service import PentestExecutionService, PentestScanRequest
+    from piton.pentest.service import PentestExecutionService, PentestScanRequest
     req = PentestScanRequest.model_validate(scan_payload)
     scan_result = await PentestExecutionService.execute_scan(req, transport=bench_transport)
 

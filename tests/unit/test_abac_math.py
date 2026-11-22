@@ -5,7 +5,7 @@ Formula:
 """
 
 import pytest
-from prometheus.security.abac_guard import ABACGuard, UserContext, ResourceContext
+from piton.security.abac_guard import ABACGuard, UserContext, ResourceContext
 
 
 @pytest.mark.unit

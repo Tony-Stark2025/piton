@@ -1,9 +1,9 @@
 """
-Autonomous Billing Support Agent for the 60-second Prometheus Quickstart Demo.
+Autonomous Billing Support Agent for the 60-second Piton Quickstart Demo.
 
-Runs inside `prometheus run -- python billing_agent.py` and proves:
+Runs inside `piton run -- python billing_agent.py` and proves:
   1. Zero-secret runtime: the agent process NEVER receives the real STRIPE_API_KEY
-     (it only sees a format-preserving ghost handle `sk_test_promghost_*`).
+     (it only sees a format-preserving ghost handle `sk_test_pitonghost_*`).
   2. Boundary secret swap + response scrubbing: calling `/gw/stripe_api/v1/invoices`
      authenticates upstream with the real key AND redacts the upstream's accidental echo leak.
   3. Bounded autonomous MCP tool calls: executes `read_ticket`, `refund_invoice` ($35),
@@ -27,12 +27,12 @@ def http_json(url: str, method: str = "GET", payload: dict | None = None, header
 
 
 def main() -> int:
-    gw = os.environ["PROMETHEUS_GATEWAY_URL"]
+    gw = os.environ["PITON_GATEWAY_URL"]
     ghost_stripe = os.environ["STRIPE_API_KEY"]
 
     print("\n=== [Agent] Step 1: Zero-Secret Process Check ===")
     print(f"  Agent sees STRIPE_API_KEY = {ghost_stripe}")
-    if not ghost_stripe.startswith("sk_test_promghost_"):
+    if not ghost_stripe.startswith("sk_test_pitonghost_"):
         print("  FAIL: Expected format-preserving ghost token!", file=sys.stderr)
         return 1
     print("  PASS: Real host secret is NOT present in agent environment.")
@@ -43,7 +43,7 @@ def main() -> int:
         headers={"Authorization": f"Bearer {ghost_stripe}"},
     )
     print(f"  Upstream response received by agent: {json.dumps(inv)}")
-    if inv.get("accidental_debug_leak") != "[REDACTED_BY_PROMETHEUS]":
+    if inv.get("accidental_debug_leak") != "[REDACTED_BY_PITON]":
         print("  FAIL: Upstream secret leak was not scrubbed!", file=sys.stderr)
         return 1
     print("  PASS: Go sidecar swapped real key at egress AND scrubbed leaked echo from response.")
@@ -89,7 +89,7 @@ def main() -> int:
     if "error" in list_resp:
         print(f"  BLOCKED BY LOCKFILE: {list_resp['error']['code']} {list_resp['error']['message']}")
     else:
-        print("  SHADOW MODE: tools/list drift recorded with X-Prometheus-Manifest-Warnings (no outage).")
+        print("  SHADOW MODE: tools/list drift recorded with X-Piton-Manifest-Warnings (no outage).")
 
     return 0
 

@@ -1,7 +1,7 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="prometheus",
+    name="piton",
     version="2.5.0",
     description="Autonomous API Penetration Testing, Continuous Immunology & Contextual SWE Repair Platform",
     packages=find_packages(),
@@ -17,7 +17,7 @@ setup(
     ],
     entry_points={
         "console_scripts": [
-            "prometheus-scan=prometheus.cli_scan:main",
+            "piton-scan=piton.cli_scan:main",
         ],
     },
 )

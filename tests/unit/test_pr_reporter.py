@@ -1,15 +1,15 @@
 """
-Unit tests for Prometheus GitHub PR Reporter and Slack alert formatter.
+Unit tests for Piton GitHub PR Reporter and Slack alert formatter.
 """
 
-from prometheus.pentest.models import (
+from piton.pentest.models import (
     AutoPatchResult,
     ExploitProof,
     HttpMethod,
     Severity,
     VulnerabilityCategory,
 )
-from prometheus.pentest.pr_reporter import PRReporter
+from piton.pentest.pr_reporter import PRReporter
 
 
 def test_format_github_pr_comment_vulnerable():

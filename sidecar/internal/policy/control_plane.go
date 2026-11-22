@@ -15,7 +15,7 @@ type asyncEvent struct {
 }
 
 // ControlPlaneBridge asynchronously ships signed DecisionLedgerRecords, lockfile drift
-// events, and MCP MRTR escalations to the central Prometheus Control Plane / Approval Bridge
+// events, and MCP MRTR escalations to the central Piton Control Plane / Approval Bridge
 // using a bounded non-blocking queue so Envoy / MCP tail latency is unaffected.
 type ControlPlaneBridge struct {
 	CollectorURL       string
@@ -84,7 +84,7 @@ func (b *ControlPlaneBridge) post(targetURL string, body []byte) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if b.APIKey != "" {
-		req.Header.Set("X-Prometheus-Control-Key", b.APIKey)
+		req.Header.Set("X-Piton-Control-Key", b.APIKey)
 	}
 	resp, err := b.client.Do(req)
 	if err == nil && resp != nil {
@@ -194,7 +194,7 @@ func projectValue(v any, allowedFields []string) any {
 
 // ProjectMCPToolResponse strips unprojected fields from MCP `tools/call` responses
 // (both JSON-RPC `result.content[*].text` JSON payloads and direct JSON objects)
-// when `response_projection` is configured on the tool in `prometheus.yaml`.
+// when `response_projection` is configured on the tool in `piton.yaml`.
 // Returns `(projectedBytes, bytesSaved)`.
 func (e *Engine) ProjectMCPToolResponse(serverName, toolName string, rawBody []byte) ([]byte, int) {
 	if len(rawBody) == 0 || serverName == "" || toolName == "" {

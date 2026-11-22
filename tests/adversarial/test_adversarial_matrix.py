@@ -6,11 +6,11 @@ Validates prompt injection resistance, tenant boundary isolation, HITL race cond
 import pytest
 import asyncio
 from unittest.mock import patch
-from prometheus.security.abac_guard import ABACGuard, UserContext, ResourceContext
-from prometheus.security.guardrails import GuardrailService
-from prometheus.mcp.server import PrometheusMCPServer
-from prometheus.proxy.state_invariants import StateWitnessRegistry
-from prometheus.proxy.token_authority import TokenAuthority
+from piton.security.abac_guard import ABACGuard, UserContext, ResourceContext
+from piton.security.guardrails import GuardrailService
+from piton.mcp.server import PitonMCPServer
+from piton.proxy.state_invariants import StateWitnessRegistry
+from piton.proxy.token_authority import TokenAuthority
 
 
 @pytest.mark.adversarial
@@ -180,7 +180,7 @@ class TestAdversarialMatrix:
     @pytest.mark.asyncio
     async def test_mcp_malformed_requests_and_unknown_methods(self):
         """Fuzzes MCP server with missing fields, invalid types, and unknown methods."""
-        mcp_server = PrometheusMCPServer()
+        mcp_server = PitonMCPServer()
 
         # 1. Unknown method returns -32601
         res1 = await mcp_server.handle_jsonrpc({"jsonrpc": "2.0", "id": -1, "method": "malicious_exploit_method", "params": {}})

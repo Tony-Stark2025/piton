@@ -21,8 +21,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/oidc"
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/store"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/oidc"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/store"
 )
 
 const (
@@ -34,7 +34,7 @@ const (
 	mrtrStateTTL        = 10 * time.Minute
 )
 
-// Policy structures mirror `prometheus/iac/schema.py` 1:1.
+// Policy structures mirror `piton/iac/schema.py` 1:1.
 
 type AgentMeta struct {
 	ID    string `json:"id"`
@@ -187,7 +187,7 @@ type rollingSample struct {
 	Value float64
 }
 
-// Metrics counters exposed via Prometheus `/metrics`.
+// Metrics counters exposed via OpenMetrics `/metrics`.
 type Metrics struct {
 	RequestsTotal     atomic.Int64
 	AllowedTotal      atomic.Int64
@@ -227,12 +227,12 @@ func NewEngine(cfg AgentIaCConfig, lock *ManifestLockfile, ledgerPath string, si
 	// Require explicit signing key in enforce mode when ledger recording is active
 	if len(signingKey) == 0 {
 		if cfg.Agent.Mode == "enforce" && ledgerPath != "" {
-			return nil, errors.New("PROMETHEUS_LEDGER_SIGNING_KEY must be set in enforce mode (refusing hardcoded fallback)")
+			return nil, errors.New("PITON_LEDGER_SIGNING_KEY must be set in enforce mode (refusing hardcoded fallback)")
 		}
-		signingKey = []byte("prometheus-ledger-signing-key")
+		signingKey = []byte("piton-ledger-signing-key")
 	}
 	if len(tokenizerKey) == 0 {
-		tokenizerKey = []byte("prometheus-default-tokenizer-key")
+		tokenizerKey = []byte("piton-default-tokenizer-key")
 	}
 
 	// Normalize policy via generic map so canonical_sha256 matches Python sorted-keys JSON
@@ -449,21 +449,21 @@ func (e *Engine) BuildMRTRInputRequiredPayload(reqID any, serverName, toolName s
 			"requestState": stateToken,
 			"inputRequests": []map[string]any{
 				{
-					"id":     "prometheus-mrtr-approval",
+					"id":     "piton-mrtr-approval",
 					"method": "elicitation/create",
 					"params": map[string]any{
 						"message": fmt.Sprintf("Out-of-band approval required for %s.%s (exceeds autonomous parameter bounds).", serverName, toolName),
 						"requestedSchema": map[string]any{
 							"type": "object",
 							"properties": map[string]any{
-								"approval_token": map[string]any{"type": "string", "description": "Signed Prometheus MRTR approval token"},
+								"approval_token": map[string]any{"type": "string", "description": "Signed Piton MRTR approval token"},
 							},
 							"required": []string{"approval_token"},
 						},
 					},
 				},
 			},
-			"prometheus": ev,
+			"piton": ev,
 		},
 	}
 }
@@ -516,7 +516,7 @@ func (e *Engine) EvaluateToolCall(
 	if !hasSrv {
 		violations = append(violations, RuleViolation{
 			RuleID:            "UNKNOWN_MCP_SERVER",
-			Message:           fmt.Sprintf("MCP server '%s' is not declared in prometheus.yaml.", serverName),
+			Message:           fmt.Sprintf("MCP server '%s' is not declared in piton.yaml.", serverName),
 			RecommendedAction: "block",
 		})
 	} else {
@@ -524,7 +524,7 @@ func (e *Engine) EvaluateToolCall(
 		if !hasTool && srvPolicy.IsStrictUnknownTools() {
 			violations = append(violations, RuleViolation{
 				RuleID:            "UNLISTED_MCP_TOOL",
-				Message:           fmt.Sprintf("Tool '%s.%s' is not declared in prometheus.yaml.", serverName, toolName),
+				Message:           fmt.Sprintf("Tool '%s.%s' is not declared in piton.yaml.", serverName, toolName),
 				RecommendedAction: "block",
 			})
 		}
@@ -1106,7 +1106,7 @@ func ComputeDescriptionSHA256(tool map[string]any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// VerifyToolsListResponse checks an upstream MCP `tools/list` response against `prometheus.lock`
+// VerifyToolsListResponse checks an upstream MCP `tools/list` response against `piton.lock`
 // AND runs Go runtime poisoning detection on every observed tool!
 func (e *Engine) VerifyToolsListResponse(serverName string, tools []map[string]any) (bool, []ManifestDrift) {
 	var drifts []ManifestDrift
@@ -1161,7 +1161,7 @@ func (e *Engine) VerifyToolsListResponse(serverName string, tools []map[string]a
 				ToolName:   tname,
 				Kind:       "unpinned_tool",
 				Action:     act,
-				Message:    fmt.Sprintf("Tool '%s' on server '%s' is not pinned in prometheus.lock.", tname, serverName),
+				Message:    fmt.Sprintf("Tool '%s' on server '%s' is not pinned in piton.lock.", tname, serverName),
 			})
 			continue
 		}

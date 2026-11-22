@@ -1,4 +1,4 @@
-# 🚀 Building Prometheus Enterprise: Autonomous API Penetration Testing & Runtime Capability Hypervisor with Gemini 3.7 & Google Cloud
+# 🚀 Building Piton: Autonomous API Penetration Testing & Runtime Capability Hypervisor with Gemini 3.7 & Google Cloud
 
 **Subtitle:** *Eliminating 100% of API security false positives with cryptographic reflection defense, CEGIS dual-pass AST program repair, and an inline capability hypervisor firewall.*
 
@@ -6,7 +6,7 @@
 
 ---
 
-![Prometheus Enterprise Architecture Banner](https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=1600&q=80)
+![Piton Architecture Banner](https://images.unsplash.com/photo-1558494949-ef010cbdcc31?auto=format&fit=crop&w=1600&q=80)
 
 ---
 
@@ -20,13 +20,13 @@ Every security engineer and backend developer knows the frustration:
 
 Broken authorization represents over 60% of modern API breaches (OWASP API Security Top 10). Traditional static and dynamic analysis tools fail because they lack **semantic awareness of multi-tenant state** and rely on brittle heuristics.
 
-To permanently solve this, we built **Prometheus Enterprise**: an autonomous API security platform combining **zero false-positive vulnerability discovery**, **dual-pass AST program repair**, and an **inline capability hypervisor** powered by **Gemini 3.7 Flash and Google Cloud**.
+To permanently solve this, we built **Piton**: an autonomous API security platform combining **zero false-positive vulnerability discovery**, **dual-pass AST program repair**, and an **inline capability hypervisor** powered by **Gemini 3.7 Flash and Google Cloud**.
 
 ---
 
-## 💡 What is Prometheus Enterprise?
+## 💡 What is Piton?
 
-Prometheus Enterprise operates across both CI/CD build time and production runtime:
+Piton operates across both CI/CD build time and production runtime:
 
 1. **Topological Route Ordering (Tarjan SCC)**: Ingests OpenAPI 3.x specifications and constructs dependency DAGs so prerequisite entities are provisioned before dependent routes are tested.
 2. **Cryptographic Reflection Defense**: Generates high-entropy canary tokens for victim tenants. An exploit is flagged **only** if the unauthorized actor retrieves the exact canary token, guaranteeing 0% false positives.
@@ -78,7 +78,7 @@ Prometheus Enterprise operates across both CI/CD build time and production runti
 
 ## 🔒 Enterprise Security: ABAC, Hypervisor & Firestore Vault
 
-Prometheus Enterprise is engineered with strict production safety invariants:
+Piton is engineered with strict production safety invariants:
 
 - **Fail-Closed Runtime**: Missing tokens, tampered signatures, or expired permits result in immediate, deterministic 403 rejection.
 - **SSRF Defense-in-Depth**: Strict IP validation blocks RFC 1918 subnets, cloud metadata endpoints (AWS IPv6 `fd00:ec2::254`, GCP, Azure, OCI), and DNS rebinding attacks.
@@ -89,7 +89,7 @@ Prometheus Enterprise is engineered with strict production safety invariants:
 
 ## 🎬 Real-World Walkthrough: From Discovery to Auto-Patch in 62s
 
-1. **Ingestion & Topological Sorting**: Prometheus parses the target OpenAPI schema, identifying that `/api/v1/invoices/{id}` requires an active tenant profile.
-2. **Canary Generation & Probe**: Prometheus provisions a victim invoice with canary `CANARY-7f8a9c2b...`. The attacker persona attempts unauthorized access. The canary is reflected in the attacker response, proving an active BOLA exploit.
-3. **CEGIS AST Repair**: Prometheus analyzes the route handler AST, synthesizes a tenant ownership guard with Gemini 3.7 Flash, and evaluates both Pass 1 (attacker denied) and Pass 2 (victim allowed). Both pass.
-4. **Verified Patch Output**: Prometheus outputs a verified git patch ready for automated pull request creation, reducing developer remediation time from weeks to seconds.
+1. **Ingestion & Topological Sorting**: Piton parses the target OpenAPI schema, identifying that `/api/v1/invoices/{id}` requires an active tenant profile.
+2. **Canary Generation & Probe**: Piton provisions a victim invoice with canary `CANARY-7f8a9c2b...`. The attacker persona attempts unauthorized access. The canary is reflected in the attacker response, proving an active BOLA exploit.
+3. **CEGIS AST Repair**: Piton analyzes the route handler AST, synthesizes a tenant ownership guard with Gemini 3.7 Flash, and evaluates both Pass 1 (attacker denied) and Pass 2 (victim allowed). Both pass.
+4. **Verified Patch Output**: Piton outputs a verified git patch ready for automated pull request creation, reducing developer remediation time from weeks to seconds.

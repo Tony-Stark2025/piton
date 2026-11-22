@@ -1,4 +1,4 @@
-module github.com/Tony-Stark2025/prometheus-enterprise/sidecar
+module github.com/Tony-Stark2025/piton/sidecar
 
 go 1.26.0
 

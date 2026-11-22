@@ -3,13 +3,13 @@ Unit tests for Polyglot AST Program Repair (TypeScript/JavaScript & Python BOLA/
 """
 
 import pytest
-from prometheus.pentest.models import (
+from piton.pentest.models import (
     ExploitProof,
     HttpMethod,
     Severity,
     VulnerabilityCategory,
 )
-from prometheus.pentest.ast_patcher import (
+from piton.pentest.ast_patcher import (
     ASTPatchSynthesizer,
     TypeScriptPatchSynthesizer,
 )

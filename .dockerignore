@@ -20,4 +20,4 @@ logs/
 *.log
 htmlcov/
 .coverage
-prometheus_exam_portal.html
+piton_exam_portal.html

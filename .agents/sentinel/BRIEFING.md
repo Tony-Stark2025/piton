@@ -1,11 +1,11 @@
 # BRIEFING — 2026-08-29T15:09:53Z
 
 ## Mission
-Orchestrate the bespoke UI/UX redesign (Deep Obsidian & Electric Sapphire dark command console), fix action draft card editing and dispatch bugs, ensure 100% CI pipeline reliability across 159+ tests, and enforce dual-namespace parity between prometheus/ and app/.
+Orchestrate the bespoke UI/UX redesign (Deep Obsidian & Electric Sapphire dark command console), fix action draft card editing and dispatch bugs, ensure 100% CI pipeline reliability across 159+ tests, and enforce dual-namespace parity between piton/ and app/.
 
 ## 🔒 My Identity
 - Archetype: sentinel
-- Working directory: c:\Users\brigh\project\prometheus\.agents\sentinel
+- Working directory: c:\Users\brigh\project\piton\.agents\sentinel
 - Orchestrator: 33849f7d-4dd7-4191-9029-d865f89d4cb7
 - Victory Auditor: to be spawned on victory claim
 
@@ -28,6 +28,6 @@ Orchestrate the bespoke UI/UX redesign (Deep Obsidian & Electric Sapphire dark c
 - **Retry count**: 0
 
 ## Artifact Index
-- c:\Users\brigh\project\prometheus\.agents\ORIGINAL_REQUEST.md — Authoritative record of user request
+- c:\Users\brigh\project\piton\.agents\ORIGINAL_REQUEST.md — Authoritative record of user request
 
 

@@ -5,19 +5,19 @@ Validates protocol serialization, schemas, tool definitions, and error handling.
 
 import pytest
 import json
-from prometheus.mcp.protocol import (
+from piton.mcp.protocol import (
     JSONRPCRequest,
     JSONRPCResponse,
     MCPToolParameter,
     MCPToolDefinition,
     MCPListToolsResponse,
 )
-from prometheus.mcp.server import PrometheusMCPServer
+from piton.mcp.server import PitonMCPServer
 
 
 @pytest.fixture
 def mcp_server():
-    return PrometheusMCPServer(enforce_hypervisor=False)
+    return PitonMCPServer(enforce_hypervisor=False)
 
 
 @pytest.mark.unit
@@ -70,7 +70,7 @@ class TestMCPProtocol:
         assert "result" in resp
         result = resp["result"]
         assert result["protocolVersion"] == "2024-11-05"
-        assert result["serverInfo"]["name"] == "prometheus-mcp-server"
+        assert result["serverInfo"]["name"] == "piton-mcp-server"
         assert "tools" in result["capabilities"]
 
     @pytest.mark.asyncio

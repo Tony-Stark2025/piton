@@ -1,5 +1,5 @@
 """
-Integration tests for Prometheus SOTA Modules:
+Integration tests for Piton SOTA Modules:
 1. OpenAPIRouteGraph (Topological execution tiers and parameter lineage)
 2. ASTPatchSynthesizer (Safe AST rewriting for ORM authorization filters)
 3. DualPassVerifier (CEGIS live dual-pass regression verification)
@@ -8,20 +8,20 @@ Integration tests for Prometheus SOTA Modules:
 import pytest
 import httpx
 
-from prometheus.pentest.ast_patcher import ASTPatchSynthesizer
-from prometheus.pentest.benchmark_app import app
-from prometheus.pentest.cegis_verifier import DualPassVerifier
-from prometheus.pentest.exploit_prober import ExploitProber
-from prometheus.pentest.models import (
+from piton.pentest.ast_patcher import ASTPatchSynthesizer
+from piton.pentest.benchmark_app import app
+from piton.pentest.cegis_verifier import DualPassVerifier
+from piton.pentest.exploit_prober import ExploitProber
+from piton.pentest.models import (
     HttpMethod,
     RouteEndpoint,
     VulnerabilityCategory,
     ExploitProof,
     Severity,
 )
-from prometheus.pentest.pr_ingestor import OpenAPIngestor
-from prometheus.pentest.route_graph import OpenAPIRouteGraph
-from prometheus.pentest.state_synthesizer import StateSynthesizer
+from piton.pentest.pr_ingestor import OpenAPIngestor
+from piton.pentest.route_graph import OpenAPIRouteGraph
+from piton.pentest.state_synthesizer import StateSynthesizer
 
 
 def test_openapi_route_graph_lineage_and_tiers():

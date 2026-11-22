@@ -1,14 +1,14 @@
 """
-Unit tests for Prometheus Auto-Patch Synthesizer.
+Unit tests for Piton Auto-Patch Synthesizer.
 """
 
-from prometheus.pentest.models import (
+from piton.pentest.models import (
     ExploitProof,
     HttpMethod,
     Severity,
     VulnerabilityCategory,
 )
-from prometheus.pentest.patch_synthesizer import PatchSynthesizer
+from piton.pentest.patch_synthesizer import PatchSynthesizer
 
 
 def test_synthesize_bola_patch_for_dictionary_lookup():

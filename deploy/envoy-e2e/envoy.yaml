@@ -1,9 +1,9 @@
-# Real Envoy Proxy <-> Prometheus Go Sidecar (`ext_proc` gRPC) End-to-End Wire Harness.
-# Runs actual Envoy Proxy v1.33 forwarding /mcp/* through prometheus-sidecar:50051
+# Real Envoy Proxy <-> Piton Go Sidecar (`ext_proc` gRPC) End-to-End Wire Harness.
+# Runs actual Envoy Proxy v1.33 forwarding /mcp/* through piton-sidecar:50051
 # to a live HTTP MCP upstream server to prove real Envoy HTTP/2 ext_proc wire parity.
 static_resources:
   clusters:
-    - name: prometheus_ext_proc
+    - name: piton_ext_proc
       type: STRICT_DNS
       connect_timeout: 0.5s
       lb_policy: ROUND_ROBIN
@@ -19,13 +19,13 @@ static_resources:
           explicit_http_config:
             http2_protocol_options: {}
       load_assignment:
-        cluster_name: prometheus_ext_proc
+        cluster_name: piton_ext_proc
         endpoints:
           - lb_endpoints:
               - endpoint:
                   address:
                     socket_address:
-                      address: prometheus-sidecar
+                      address: piton-sidecar
                       port_value: 50051
 
     - name: upstream_mcp
@@ -53,7 +53,7 @@ static_resources:
             - name: envoy.filters.network.http_connection_manager
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                stat_prefix: prometheus_mcp_e2e
+                stat_prefix: piton_mcp_e2e
                 route_config:
                   name: mcp_routes
                   virtual_hosts:
@@ -68,7 +68,7 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
                       grpc_service:
                         envoy_grpc:
-                          cluster_name: prometheus_ext_proc
+                          cluster_name: piton_ext_proc
                         timeout: 2s
                       message_timeout: 2s
                       failure_mode_allow: false

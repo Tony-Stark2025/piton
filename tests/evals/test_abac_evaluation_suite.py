@@ -1,7 +1,7 @@
 import pytest
 import tempfile
 import os
-from prometheus.security.abac_engine import (
+from piton.security.abac_engine import (
     ABACPolicyEngine,
     ABACUserRecord,
     ABACResourceRecord,

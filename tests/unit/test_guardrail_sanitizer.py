@@ -4,7 +4,7 @@ Validates PII masking and prompt injection detection.
 """
 
 import pytest
-from prometheus.security.guardrails import GuardrailService, GuardrailResult
+from piton.security.guardrails import GuardrailService, GuardrailResult
 
 
 @pytest.mark.unit

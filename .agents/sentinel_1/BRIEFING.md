@@ -1,11 +1,11 @@
 # BRIEFING — 2026-08-25T20:37:30Z
 
 ## Mission
-Route and supervise the deployment and verification of the Prometheus platform on Vertex AI Agent Engine.
+Route and supervise the deployment and verification of the Piton platform on Vertex AI Agent Engine.
 
 ## 🔒 My Identity
 - Archetype: sentinel
-- Working directory: c:\Users\brigh\project\prometheus\.agents\sentinel_1
+- Working directory: c:\Users\brigh\project\piton\.agents\sentinel_1
 - Orchestrator: 1ae44428-8db8-493a-b3e3-c390f30c1dab
 - Victory Auditor: to be spawned on victory claim
 
@@ -15,7 +15,7 @@ Route and supervise the deployment and verification of the Prometheus platform o
 - Route to SWE Light (teamwork_preview_swe) per user explicit request ("single self-contained fix; keep it small and focused")
 
 ## User Context
-- **Last user request**: Deploy and verify Prometheus on Google Cloud Vertex AI Agent Engine in us-central1 (project gen-lang-client-0942141479), integrity mode demo.
+- **Last user request**: Deploy and verify Piton on Google Cloud Vertex AI Agent Engine in us-central1 (project gen-lang-client-0942141479), integrity mode demo.
 - **Pending clarifications**: none
 - **Delivered results**: []
 
@@ -30,4 +30,4 @@ Route and supervise the deployment and verification of the Prometheus platform o
 - **Retry count**: 0
 
 ## Artifact Index
-- c:\Users\brigh\project\prometheus\.agents\ORIGINAL_REQUEST.md — Authoritative record of user request
+- c:\Users\brigh\project\piton\.agents\ORIGINAL_REQUEST.md — Authoritative record of user request

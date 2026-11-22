@@ -12,15 +12,15 @@ import subprocess
 import pytest
 import httpx
 
-from prometheus.pentest.models import (
+from piton.pentest.models import (
     DualTenantContext,
     ExploitProbeRequest,
     HttpMethod,
     RouteEndpoint,
     VulnerabilityCategory,
 )
-from prometheus.pentest.exploit_prober import ExploitProber
-from prometheus.pentest.state_synthesizer import StateSynthesizer
+from piton.pentest.exploit_prober import ExploitProber
+from piton.pentest.state_synthesizer import StateSynthesizer
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def node_server_port():
 
 @pytest.fixture
 def dual_tenant_context():
-    synthesizer = StateSynthesizer(jwt_secret="prometheus-secret-key-123")
+    synthesizer = StateSynthesizer(jwt_secret="piton-secret-key-123")
     synthesizer.register_seeded_resource(
         resource_type="invoice",
         resource_id="inv-alpha-992",

@@ -1,9 +1,9 @@
 """
-End-to-End Cross-Language Integration Test for the Prometheus Enterprise Control Plane:
-- Real compiled Go `prometheus-sidecar` <-> Python Control Plane Server (SQLite)
+End-to-End Cross-Language Integration Test for the Piton Control Plane:
+- Real compiled Go `piton-sidecar` <-> Python Control Plane Server (SQLite)
 - Uber-style Declarative Response Projection (dot-paths + `/metrics` byte savings)
 - Live MCP 2026-07-28 MRTR Escalation -> Slack Block Kit Webhook -> Signed Slack Interaction
-  Callback -> Python-minted `X-Prometheus-MRTR-Approval` -> Go Sidecar Verification & Retry
+  Callback -> Python-minted `X-Piton-MRTR-Approval` -> Go Sidecar Verification & Retry
 - Multi-Pod Signed Decision Ledger Ingestion (cross-language Go->Python HMAC verification)
 - Fleet `shadow -> enforce` Readiness Scorecards, Embedded Governance UI & Signed SOC2 Export
 """
@@ -24,8 +24,8 @@ import urllib.request
 
 import pytest
 
-from prometheus.control_plane.server import create_control_plane_server
-from prometheus.iac.schema import (
+from piton.control_plane.server import create_control_plane_server
+from piton.iac.schema import (
     AgentIaCConfig,
     AgentMeta,
     BoundExceededAction,
@@ -40,7 +40,7 @@ from prometheus.iac.schema import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SIDECAR_BIN = REPO_ROOT / "sidecar" / "bin" / "prometheus-sidecar"
+SIDECAR_BIN = REPO_ROOT / "sidecar" / "bin" / "piton-sidecar"
 
 
 def _free_port() -> int:
@@ -79,11 +79,11 @@ def _get_json(url: str, headers: dict | None = None) -> tuple[int, dict]:
 
 
 def test_enterprise_control_plane_mrtr_slack_projection_and_audit_e2e(tmp_path: Path):
-    from prometheus.cli import _resolve_sidecar_binary
+    from piton.cli import _resolve_sidecar_binary
 
     sidecar_bin = _resolve_sidecar_binary(None)
     if sidecar_bin is None or not sidecar_bin.is_file():
-        pytest.skip("prometheus-sidecar binary unavailable")
+        pytest.skip("piton-sidecar binary unavailable")
 
     signing_key = b"enterprise-control-plane-signing-key-32b"
     control_api_key = "cp-live-api-key-99"
@@ -187,8 +187,8 @@ def test_enterprise_control_plane_mrtr_slack_projection_and_audit_e2e(tmp_path: 
 
     sidecar_port = _free_port()
     env = os.environ.copy()
-    env["PROMETHEUS_LEDGER_SIGNING_KEY"] = signing_key.decode("utf-8")
-    env["PROMETHEUS_CONTROL_API_KEY"] = control_api_key
+    env["PITON_LEDGER_SIGNING_KEY"] = signing_key.decode("utf-8")
+    env["PITON_CONTROL_API_KEY"] = control_api_key
     sidecar_proc = subprocess.Popen(
         [
             str(sidecar_bin),
@@ -215,7 +215,7 @@ def test_enterprise_control_plane_mrtr_slack_projection_and_audit_e2e(tmp_path: 
             "X-Forwarded-User": "alice@acme.com",
             "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
         }
-        cp_hdrs = {"X-Prometheus-Control-Key": control_api_key}
+        cp_hdrs = {"X-Piton-Control-Key": control_api_key}
 
         # Step A: Uber-style Response Projection strips raw_ssn, credit_card, and 600-byte blob
         code, body = _post_json(
@@ -228,8 +228,8 @@ def test_enterprise_control_plane_mrtr_slack_projection_and_audit_e2e(tmp_path: 
         assert inner_resp == {"invoice_id": "inv_777", "status": "paid", "customer": {"tier": "enterprise"}}
         with urllib.request.urlopen(f"http://127.0.0.1:{sidecar_port}/metrics", timeout=2) as r:
             metrics_txt = r.read().decode("utf-8")
-            assert "prometheus_sidecar_bytes_projected_total " in metrics_txt
-            assert "prometheus_sidecar_bytes_projected_total 0\n" not in metrics_txt
+            assert "piton_sidecar_bytes_projected_total " in metrics_txt
+            assert "piton_sidecar_bytes_projected_total 0\n" not in metrics_txt
 
         # Step B: Over-bounds refund ($250 > $100) triggers MRTR input_required + async Control Plane + Slack webhook
         refund_payload = {
@@ -257,7 +257,7 @@ def test_enterprise_control_plane_mrtr_slack_projection_and_audit_e2e(tmp_path: 
         assert len(approvals) == 1
         esc_id = approvals[0]["id"]
         assert len(slack_received) == 1
-        assert slack_received[0]["blocks"][0]["text"]["text"].startswith("Prometheus MRTR")
+        assert slack_received[0]["blocks"][0]["text"]["text"].startswith("Piton MRTR")
 
         # Step C: Unsigned Slack callback MUST be rejected 401; signed Slack callback approves & mints token!
         interaction_form = urllib.parse.urlencode(
@@ -265,7 +265,7 @@ def test_enterprise_control_plane_mrtr_slack_projection_and_audit_e2e(tmp_path: 
                 "payload": json.dumps(
                     {
                         "user": {"username": "secops-lead"},
-                        "actions": [{"action_id": "prometheus_mrtr_approve", "value": esc_id}],
+                        "actions": [{"action_id": "piton_mrtr_approve", "value": esc_id}],
                     }
                 )
             }
@@ -313,7 +313,7 @@ def test_enterprise_control_plane_mrtr_slack_projection_and_audit_e2e(tmp_path: 
             {
                 **base_hdrs,
                 "Idempotency-Key": "cp-e2e-refund-1",
-                "X-Prometheus-MRTR-Approval": approval_token,
+                "X-Piton-MRTR-Approval": approval_token,
             },
         )
         assert code == 200
@@ -340,12 +340,12 @@ def test_enterprise_control_plane_mrtr_slack_projection_and_audit_e2e(tmp_path: 
         with urllib.request.urlopen(f"{cp_url}/", timeout=3) as ui_resp:
             html = ui_resp.read().decode("utf-8")
             assert ui_resp.status == 200
-            assert "PROMETHEUS" in html and "MRTR Human Approvals" in html
+            assert "PITON" in html and "MRTR Human Approvals" in html
 
         # Signed SOC2 / EU AI Act Audit Bundle verifies cleanly
         code, bundle = _get_json(f"{cp_url}/api/v1/audit/export", cp_hdrs)
         assert code == 200
-        assert bundle["schema"] == "prometheus.compliance.audit_bundle.v1"
+        assert bundle["schema"] == "piton.compliance.audit_bundle.v1"
         assert len(bundle["decision_ledger"]) == 3
         assert len(bundle["mrtr_approvals"]) == 1
         body_no_sig = {k: v for k, v in bundle.items() if k != "integrity"}

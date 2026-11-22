@@ -1,7 +1,7 @@
-# Project: Prometheus Enterprise
+# Project: Piton
 
 ## Architecture
-Prometheus Enterprise is an autonomous API security platform combining a zero false-positive vulnerability discovery engine with a runtime capability hypervisor for modern microservices and AI agent tool execution.
+Piton is an autonomous API security platform combining a zero false-positive vulnerability discovery engine with a runtime capability hypervisor for modern microservices and AI agent tool execution.
 
 ```text
                   ┌──────────────────────────────────────────────────────────┐
@@ -12,7 +12,7 @@ Prometheus Enterprise is an autonomous API security platform combining a zero fa
                                                 │
                                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│                            Prometheus API Security & Hypervisor Architecture                             │
+│                            Piton API Security & Hypervisor Architecture                             │
 │                                                                                                          │
 │   ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐   │
 │   │ [1] Lineage Graph Engine: OpenAPI 3.x Ingestion, Tarjan SCC Topological Condensation             │   │
@@ -40,7 +40,7 @@ Prometheus Enterprise is an autonomous API security platform combining a zero fa
 ```
 
 ## Code Layout
-- `prometheus/`: Root application package:
+- `piton/`: Root application package:
   - `pentest/`: Core autonomous API penetration testing engine:
     - `lineage_graph.py`: OpenAPI parser and topological dependency condensation.
     - `state_synthesizer.py`: Dual-tenant credential and canary generator.

@@ -1,5 +1,5 @@
 """
-Unit tests for Prometheus Multi-Provider LLM Orchestrator (In-Service Subscriptions & BYOK).
+Unit tests for Piton Multi-Provider LLM Orchestrator (In-Service Subscriptions & BYOK).
 """
 
 import asyncio
@@ -7,8 +7,8 @@ import json
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
-from prometheus.config import Settings
-from prometheus.llm.provider_manager import (
+from piton.config import Settings
+from piton.llm.provider_manager import (
     ProviderManager,
     ProviderType,
     TelemetryCache,
@@ -56,7 +56,7 @@ def test_provider_resolution_precedence(monkeypatch):
     pm = ProviderManager()
 
     # 1. Copilot Subscription takes precedence in auto mode
-    with patch("prometheus.llm.provider_manager.settings") as mock_settings:
+    with patch("piton.llm.provider_manager.settings") as mock_settings:
         mock_settings.llm_provider = "auto"
         mock_settings.copilot_token = "gho_testcopilottoken123"
         mock_settings.copilot_base_url = "https://api.githubcopilot.com"
@@ -73,7 +73,7 @@ def test_provider_resolution_precedence(monkeypatch):
         assert cfg["model"] == "gpt-4o"
 
     # 2. AI Gateway Subscription
-    with patch("prometheus.llm.provider_manager.settings") as mock_settings:
+    with patch("piton.llm.provider_manager.settings") as mock_settings:
         mock_settings.llm_provider = "auto"
         mock_settings.copilot_token = None
         mock_settings.ai_gateway_url = "https://gateway.ai.cloudflare.com/v1/test"
@@ -90,7 +90,7 @@ def test_provider_resolution_precedence(monkeypatch):
         assert cfg["token"] == "cf_gw_token"
 
     # 3. Vertex AI Subscription via ADC / GCP Project
-    with patch("prometheus.llm.provider_manager.settings") as mock_settings:
+    with patch("piton.llm.provider_manager.settings") as mock_settings:
         mock_settings.llm_provider = "auto"
         mock_settings.copilot_token = None
         mock_settings.ai_gateway_url = None
@@ -109,7 +109,7 @@ def test_provider_resolution_precedence(monkeypatch):
         assert cfg["model"] == "gemini-3.7-flash"
 
     # 4. BYOK: Gemini Developer Key
-    with patch("prometheus.llm.provider_manager.settings") as mock_settings:
+    with patch("piton.llm.provider_manager.settings") as mock_settings:
         mock_settings.llm_provider = "auto"
         mock_settings.copilot_token = None
         mock_settings.ai_gateway_url = None
@@ -126,7 +126,7 @@ def test_provider_resolution_precedence(monkeypatch):
         assert cfg["api_key"] == "AIzaSyTestGeminiKey"
 
     # 5. BYOK: Anthropic
-    with patch("prometheus.llm.provider_manager.settings") as mock_settings:
+    with patch("piton.llm.provider_manager.settings") as mock_settings:
         mock_settings.llm_provider = "auto"
         mock_settings.copilot_token = None
         mock_settings.ai_gateway_url = None
@@ -142,7 +142,7 @@ def test_provider_resolution_precedence(monkeypatch):
         assert cfg["api_key"] == "sk-ant-testkey"
 
     # 6. BYOK: OpenAI
-    with patch("prometheus.llm.provider_manager.settings") as mock_settings:
+    with patch("piton.llm.provider_manager.settings") as mock_settings:
         mock_settings.llm_provider = "auto"
         mock_settings.copilot_token = None
         mock_settings.ai_gateway_url = None
@@ -158,7 +158,7 @@ def test_provider_resolution_precedence(monkeypatch):
         assert cfg["api_key"] == "sk-proj-testkey"
 
     # 7. Offline / Air-Gapped Fallback: Pure Deterministic
-    with patch("prometheus.llm.provider_manager.settings") as mock_settings:
+    with patch("piton.llm.provider_manager.settings") as mock_settings:
         mock_settings.llm_provider = "auto"
         mock_settings.copilot_token = None
         mock_settings.ai_gateway_url = None

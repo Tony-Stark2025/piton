@@ -12,17 +12,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/policy"
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/scrub"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/policy"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/scrub"
 )
 
 const maxBodyBytes = 10 << 20 // 10 MiB safety limit against memory exhaustion
 
-// Server implements the Prometheus HTTP sidecar endpoints:
+// Server implements the Piton HTTP sidecar endpoints:
 //  1. `/mcp/{server}` — Bidirectional MCP proxy (JSON + SSE tools/list pinning, MRTR, bounds)
 //  2. `/gw/{slot}/{path...}` — Zero-secret reverse proxy (constant-time ghost check, strict `/` prefix,
 //     no-redirect, compressed-response rejection, sliding-window scrubbing of ALL active secrets)
-//  3. `/healthz` & `/metrics` — K8s health & Prometheus metrics exposition
+//  3. `/healthz` & `/metrics` — K8s health & OpenMetrics exposition
 type Server struct {
 	Engine      *policy.Engine
 	HTTPClient  *http.Client
@@ -72,14 +72,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	m := &s.Engine.Metrics
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	fmt.Fprintf(w, "# TYPE prometheus_sidecar_requests_total counter\nprometheus_sidecar_requests_total %d\n", m.RequestsTotal.Load())
-	fmt.Fprintf(w, "# TYPE prometheus_sidecar_allowed_total counter\nprometheus_sidecar_allowed_total %d\n", m.AllowedTotal.Load())
-	fmt.Fprintf(w, "# TYPE prometheus_sidecar_shadow_denied_total counter\nprometheus_sidecar_shadow_denied_total %d\n", m.ShadowDeniedTotal.Load())
-	fmt.Fprintf(w, "# TYPE prometheus_sidecar_denied_total counter\nprometheus_sidecar_denied_total %d\n", m.DeniedTotal.Load())
-	fmt.Fprintf(w, "# TYPE prometheus_sidecar_mrtr_escalated_total counter\nprometheus_sidecar_mrtr_escalated_total %d\n", m.MRTREscalated.Load())
-	fmt.Fprintf(w, "# TYPE prometheus_sidecar_rug_pulls_blocked_total counter\nprometheus_sidecar_rug_pulls_blocked_total %d\n", m.RugPullsBlocked.Load())
-	fmt.Fprintf(w, "# TYPE prometheus_sidecar_secrets_redacted_total counter\nprometheus_sidecar_secrets_redacted_total %d\n", m.SecretsRedacted.Load())
-	fmt.Fprintf(w, "# TYPE prometheus_sidecar_bytes_projected_total counter\nprometheus_sidecar_bytes_projected_total %d\n", m.BytesProjected.Load())
+	fmt.Fprintf(w, "# TYPE piton_sidecar_requests_total counter\npiton_sidecar_requests_total %d\n", m.RequestsTotal.Load())
+	fmt.Fprintf(w, "# TYPE piton_sidecar_allowed_total counter\npiton_sidecar_allowed_total %d\n", m.AllowedTotal.Load())
+	fmt.Fprintf(w, "# TYPE piton_sidecar_shadow_denied_total counter\npiton_sidecar_shadow_denied_total %d\n", m.ShadowDeniedTotal.Load())
+	fmt.Fprintf(w, "# TYPE piton_sidecar_denied_total counter\npiton_sidecar_denied_total %d\n", m.DeniedTotal.Load())
+	fmt.Fprintf(w, "# TYPE piton_sidecar_mrtr_escalated_total counter\npiton_sidecar_mrtr_escalated_total %d\n", m.MRTREscalated.Load())
+	fmt.Fprintf(w, "# TYPE piton_sidecar_rug_pulls_blocked_total counter\npiton_sidecar_rug_pulls_blocked_total %d\n", m.RugPullsBlocked.Load())
+	fmt.Fprintf(w, "# TYPE piton_sidecar_secrets_redacted_total counter\npiton_sidecar_secrets_redacted_total %d\n", m.SecretsRedacted.Load())
+	fmt.Fprintf(w, "# TYPE piton_sidecar_bytes_projected_total counter\npiton_sidecar_bytes_projected_total %d\n", m.BytesProjected.Load())
 }
 
 func resolveSecret(source string) (string, error) {
@@ -367,7 +367,7 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 
 	trimmedBody := bytes.TrimSpace(bodyBytes)
 	if len(trimmedBody) > 0 && trimmedBody[0] == '[' {
-		writeJSONRPCError(w, nil, -32600, "JSON-RPC batch requests are not permitted by Prometheus policy", nil)
+		writeJSONRPCError(w, nil, -32600, "JSON-RPC batch requests are not permitted by Piton policy", nil)
 		return
 	}
 
@@ -395,7 +395,7 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 				idemKey = ik
 			}
 		}
-		mrtrTok := r.Header.Get("X-Prometheus-MRTR-Approval")
+		mrtrTok := r.Header.Get("X-Piton-MRTR-Approval")
 		if mrtrTok == "" {
 			if irs, ok := rpcReq.Params["inputResponses"].([]any); ok && len(irs) > 0 {
 				if first, ok := irs[0].(map[string]any); ok {
@@ -411,7 +411,7 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.Engine.AppendLedgerRecord(traceparent, serverName, toolName, argsMap, ev, oboPrincipal, idemKey, latMs)
 
 		if ev.Verdict == "deny" {
-			writeJSONRPCError(w, rpcReq.ID, -32001, "Prometheus Policy Denial", ev)
+			writeJSONRPCError(w, rpcReq.ID, -32001, "Piton Policy Denial", ev)
 			return
 		}
 		if ev.Verdict == "mrtr_escalate" {
@@ -466,7 +466,7 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(drifts) > 0 {
-				w.Header().Set("X-Prometheus-Manifest-Warnings", fmt.Sprintf("%d", len(drifts)))
+				w.Header().Set("X-Piton-Manifest-Warnings", fmt.Sprintf("%d", len(drifts)))
 			}
 		}
 	}

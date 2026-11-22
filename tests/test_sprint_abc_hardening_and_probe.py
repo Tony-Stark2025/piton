@@ -1,10 +1,10 @@
 """
 Sprint A/B/C Verification Tests:
-- Live HTTP/SSE MCP probing (`prometheus init --probe` & `prometheus lock --probe`)
-- Live STDIO MCP probing & `prometheus wrap` rug-pull blocking + parameter bounds (Cursor/Claude Desktop)
+- Live HTTP/SSE MCP probing (`piton init --probe` & `piton lock --probe`)
+- Live STDIO MCP probing & `piton wrap` rug-pull blocking + parameter bounds (Cursor/Claude Desktop)
 - OTel span ingestion (`load_otel_or_ledger_records`) + CEL (`agentgateway`) & Cedar (`ToolHive`/`AgentCore`) exporters
 - P0 audit fixes: URL parser differential (`https://evil.com/?x=@acme.com`), NFKC homoglyph poisoning,
-  CI `prometheus lock --diff` failing on poisoned internal tools, and fail-closed unlisted tools/missing params.
+  CI `piton lock --diff` failing on poisoned internal tools, and fail-closed unlisted tools/missing params.
 """
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -15,10 +15,10 @@ import socket
 import sys
 import threading
 
-from prometheus.cli import main as cli_main
-from prometheus.iac.mcp_probe import probe_http_mcp_tools, probe_stdio_mcp_tools, wrap_stdio_mcp
-from prometheus.iac.poisoning_lint import lint_tools_list
-from prometheus.iac.replay import (
+from piton.cli import main as cli_main
+from piton.iac.mcp_probe import probe_http_mcp_tools, probe_stdio_mcp_tools, wrap_stdio_mcp
+from piton.iac.poisoning_lint import lint_tools_list
+from piton.iac.replay import (
     DecisionVerdict,
     evaluate_tool_call_against_policy,
     export_cedar_policies,
@@ -26,7 +26,7 @@ from prometheus.iac.replay import (
     load_otel_or_ledger_records,
     replay_traces,
 )
-from prometheus.iac.schema import (
+from piton.iac.schema import (
     AgentIaCConfig,
     AgentMeta,
     EnforcementMode,
@@ -142,13 +142,13 @@ def test_live_sse_http_probe_and_ci_diff_blocks_internal_poisoning(tmp_path: Pat
             json.dumps({"mcpServers": {"billing-internal": {"url": f"http://127.0.0.1:{port}/mcp"}}}),
             encoding="utf-8",
         )
-        # Live `--probe` populates prometheus.lock with zero manual manifest file!
+        # Live `--probe` populates piton.lock with zero manual manifest file!
         rc = cli_main(["init", "--repo", str(tmp_path), "--probe"])
         assert rc == 0
-        lock = ManifestLockfile.load_file(tmp_path / "prometheus.lock")
+        lock = ManifestLockfile.load_file(tmp_path / "piton.lock")
         assert "get_invoice" in lock.servers["billing-internal"].tools
 
-        # Inject poisoning into an INTERNAL server manifest -> `prometheus lock --diff` MUST exit 1!
+        # Inject poisoning into an INTERNAL server manifest -> `piton lock --diff` MUST exit 1!
         poisoned_manifest = tmp_path / "poisoned_internal.json"
         poisoned_manifest.write_text(
             json.dumps(
@@ -170,8 +170,8 @@ def test_live_sse_http_probe_and_ci_diff_blocks_internal_poisoning(tmp_path: Pat
         rc_diff = cli_main(
             [
                 "lock",
-                "--config", str(tmp_path / "prometheus.yaml"),
-                "--lockfile", str(tmp_path / "prometheus.lock"),
+                "--config", str(tmp_path / "piton.yaml"),
+                "--lockfile", str(tmp_path / "piton.lock"),
                 "--manifest", str(poisoned_manifest),
                 "--diff",
             ]
@@ -181,7 +181,7 @@ def test_live_sse_http_probe_and_ci_diff_blocks_internal_poisoning(tmp_path: Pat
         srv.shutdown()
 
 
-def test_stdio_mcp_live_probe_and_prometheus_wrap_rug_pull_enforcement(tmp_path: Path):
+def test_stdio_mcp_live_probe_and_piton_wrap_rug_pull_enforcement(tmp_path: Path):
     # Create a real local STDIO MCP server script (like Cursor / Claude Desktop servers)
     stdio_script = tmp_path / "mock_stdio_mcp.py"
     stdio_script.write_text(
@@ -486,10 +486,10 @@ rl.on("line", (line) => {
 def test_sidecar_binary_auto_download_verifies_sha256_and_rejects_tampering(tmp_path: Path):
     import hashlib
     import os
-    from prometheus.cli import _detect_sidecar_asset_name, _download_verified_sidecar_binary
+    from piton.cli import _detect_sidecar_asset_name, _download_verified_sidecar_binary
 
     asset = _detect_sidecar_asset_name()
-    assert asset is not None and asset.startswith("prometheus-sidecar-")
+    assert asset is not None and asset.startswith("piton-sidecar-")
 
     good_bytes = b"#!/bin/sh\necho ok\n"
     good_sha = hashlib.sha256(good_bytes).hexdigest()

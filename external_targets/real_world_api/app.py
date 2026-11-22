@@ -15,7 +15,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, HTTPException, Header, status
 from pydantic import BaseModel
 
-DEFAULT_JWT_SECRET = "prometheus-test-jwt-secret-key-32bytes-long!"
+DEFAULT_JWT_SECRET = "piton-test-jwt-secret-key-32bytes-long!"
 DEFAULT_JWT_ALGORITHM = "HS256"
 
 app = FastAPI(

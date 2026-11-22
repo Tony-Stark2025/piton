@@ -1,9 +1,9 @@
-# Production Envoy Proxy configuration wiring `prometheus-sidecar` as a true
+# Production Envoy Proxy configuration wiring `piton-sidecar` as a true
 # bidirectional gRPC `envoy.filters.http.ext_proc` filter (port 50051).
 # Includes message_timeout, fail-closed posture, and gRPC health check.
 static_resources:
   clusters:
-    - name: prometheus_ext_proc
+    - name: piton_ext_proc
       type: STRICT_DNS
       connect_timeout: 0.25s
       lb_policy: ROUND_ROBIN
@@ -19,7 +19,7 @@ static_resources:
           explicit_http_config:
             http2_protocol_options: {}
       load_assignment:
-        cluster_name: prometheus_ext_proc
+        cluster_name: piton_ext_proc
         endpoints:
           - lb_endpoints:
               - endpoint:
@@ -53,7 +53,7 @@ static_resources:
             - name: envoy.filters.network.http_connection_manager
               typed_config:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
-                stat_prefix: prometheus_mcp
+                stat_prefix: piton_mcp
                 route_config:
                   name: mcp_routes
                   virtual_hosts:
@@ -68,7 +68,7 @@ static_resources:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
                       grpc_service:
                         envoy_grpc:
-                          cluster_name: prometheus_ext_proc
+                          cluster_name: piton_ext_proc
                         timeout: 2s
                       message_timeout: 2s
                       failure_mode_allow: false

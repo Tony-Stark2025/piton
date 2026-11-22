@@ -1,5 +1,5 @@
 """
-Zero-dependency local mock upstreams for the 60-second Prometheus quickstart demo:
+Zero-dependency local mock upstreams for the 60-second Piton quickstart demo:
   - GET  /v1/invoices           : Mock Stripe API verifying real key injection & echoing a leak
   - POST /mcp/billing           : Internal Billing MCP server (get_invoice, refund_invoice)
   - POST /mcp/zendesk           : Third-party Vendor MCP server (supports live /toggle-rug-pull)

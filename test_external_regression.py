@@ -1,5 +1,5 @@
 """
-Prometheus Enterprise Autonomous Security Regression Test (httpx)
+Piton Autonomous Security Regression Test (httpx)
 Target Route: DELETE /api/v1/admin/carriers/carr-001
 OWASP Vector: API5:2023 - Broken Function Level Authorization
 
@@ -62,7 +62,7 @@ def test_api_v1_admin_carriers_carr_001_tenant_isolation():
 
 
 """
-Prometheus Enterprise Autonomous Security Regression Test (httpx)
+Piton Autonomous Security Regression Test (httpx)
 Target Route: GET /api/v1/shipments/shp-alpha-8832
 OWASP Vector: API1:2023 - Broken Object Level Authorization
 

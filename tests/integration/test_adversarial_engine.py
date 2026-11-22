@@ -1,20 +1,20 @@
 """
-Integration tests for Prometheus Bleeding-Edge Adversarial Engine.
+Integration tests for Piton Bleeding-Edge Adversarial Engine.
 Verifies dynamic tool dispatch, repetition guard, and trajectory logging.
 """
 
 import pytest
 import httpx
 
-from prometheus.pentest.benchmark_app import app
-from prometheus.pentest.engine import (
-    PrometheusAdversarialEngine,
+from piton.pentest.benchmark_app import app
+from piton.pentest.engine import (
+    PitonAdversarialEngine,
     RepetitionGuard,
     TrajectoryStore,
 )
-from prometheus.pentest.exploit_prober import ExploitProber
-from prometheus.pentest.pr_ingestor import OpenAPIngestor
-from prometheus.pentest.state_synthesizer import StateSynthesizer
+from piton.pentest.exploit_prober import ExploitProber
+from piton.pentest.pr_ingestor import OpenAPIngestor
+from piton.pentest.state_synthesizer import StateSynthesizer
 
 
 def test_repetition_guard_detects_loops():
@@ -72,7 +72,7 @@ async def test_adversarial_engine_end_to_end_execution():
         transport=transport,
     )
 
-    engine = PrometheusAdversarialEngine(
+    engine = PitonAdversarialEngine(
         base_url="http://testserver",
         endpoints=endpoints,
         context=context,

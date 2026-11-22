@@ -1,5 +1,5 @@
 """
-Integration tests for Prometheus Capability Hypervisor Proxy Lifecycle.
+Integration tests for Piton Capability Hypervisor Proxy Lifecycle.
 Verifies end-to-end enforcement:
 a) Interception of out-of-order tool calls and structured denial envelope emission.
 b) Successful mutation admission when accompanied by valid pre-state witness and action permit.
@@ -11,20 +11,20 @@ import pytest
 import asyncio
 from typing import Any, Dict
 
-from prometheus.proxy.models import (
+from piton.proxy.models import (
     DenialCode,
     ProxyToolRequest,
     ToolCallType,
 )
-from prometheus.proxy.token_authority import (
+from piton.proxy.token_authority import (
     AttenuationViolationError,
     TokenAuthority,
 )
-from prometheus.proxy.state_invariants import (
+from piton.proxy.state_invariants import (
     StateWitnessRegistry,
 )
-from prometheus.proxy.hypervisor import ToolExecutionHypervisor
-from prometheus.mcp.server import PrometheusMCPServer
+from piton.proxy.hypervisor import ToolExecutionHypervisor
+from piton.mcp.server import PitonMCPServer
 
 
 @pytest.fixture

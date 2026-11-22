@@ -15,22 +15,22 @@ import os
 import pytest
 import jwt
 
-from prometheus.pentest.ast_patcher import (
+from piton.pentest.ast_patcher import (
     ASTPatchSynthesizer,
     TypeScriptPatchSynthesizer,
     AuthorizationPatchTransformer,
 )
-from prometheus.pentest.models import (
+from piton.pentest.models import (
     ExploitProof,
     HttpMethod,
     Severity,
     VulnerabilityCategory,
 )
-from prometheus.pentest.state_synthesizer import StateSynthesizer
-from prometheus.pentest.exploit_prober import ExploitProber, async_validate_ssrf, SSRFValidationError
-from prometheus.pentest.route_graph import OpenAPIRouteGraph, RouteOperation
-from prometheus.pentest.engine import TrajectoryStore
-from prometheus.llm.provider_manager import TelemetryCache
+from piton.pentest.state_synthesizer import StateSynthesizer
+from piton.pentest.exploit_prober import ExploitProber, async_validate_ssrf, SSRFValidationError
+from piton.pentest.route_graph import OpenAPIRouteGraph, RouteOperation
+from piton.pentest.engine import TrajectoryStore
+from piton.llm.provider_manager import TelemetryCache
 
 
 def test_sec_05_ts_bola_fails_closed_on_undefined_user():
@@ -124,13 +124,13 @@ def test_sec_07_state_synthesizer_dynamic_jwt_secret():
     decoded = jwt.decode(token, s1.jwt_secret, algorithms=["HS256"])
     assert decoded["user_id"] == "u1"
 
-    # Environment variable PROMETHEUS_JWT_SECRET override
-    os.environ["PROMETHEUS_JWT_SECRET"] = "custom-env-secret-key-at-least-32-chars-long!"
+    # Environment variable PITON_JWT_SECRET override
+    os.environ["PITON_JWT_SECRET"] = "custom-env-secret-key-at-least-32-chars-long!"
     try:
         s_env = StateSynthesizer()
         assert s_env.jwt_secret == "custom-env-secret-key-at-least-32-chars-long!"
     finally:
-        os.environ.pop("PROMETHEUS_JWT_SECRET", None)
+        os.environ.pop("PITON_JWT_SECRET", None)
 
 
 def test_sec_08_exploit_prober_auto_detects_loopback():

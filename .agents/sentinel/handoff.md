@@ -3,7 +3,7 @@
 ## Observation
 User submitted a full-scope enterprise request:
 1. Replace mock telemetry data fixtures in GitHub, Jira, and Slack with enterprise live API integrations.
-2. Deploy the Prometheus platform to Google Cloud Vertex AI Agent Engine (gen-lang-client-0942141479, us-central1) and Cloud Run with Secret Manager integration.
+2. Deploy the Piton platform to Google Cloud Vertex AI Agent Engine (gen-lang-client-0942141479, us-central1) and Cloud Run with Secret Manager integration.
 3. Implement and execute an end-to-end programmatic verification suite validating multi-agent correlation, ABAC guardrails, HITL action lifecycle, and remote query execution.
 
 ## Logic Chain

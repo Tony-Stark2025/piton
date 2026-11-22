@@ -12,9 +12,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/policy"
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/proxy"
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/scrub"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/policy"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/proxy"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/scrub"
 )
 
 func floatPtr(v float64) *float64 { return &v }
@@ -22,7 +22,7 @@ func intPtr(v int) *int           { return &v }
 
 func TestGatewayGhostSwapStrictPrefixNoRedirectAndChunkBoundaryScrubbing(t *testing.T) {
 	const realSecret = "sk_live_REAL_SUPER_SECRET_999999"
-	const ghostToken = "sk_live_promghost_deadbeef1234"
+	const ghostToken = "sk_live_pitonghost_deadbeef1234"
 	t.Setenv("TEST_STRIPE_KEY", realSecret)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -129,14 +129,14 @@ func TestGatewayGhostSwapStrictPrefixNoRedirectAndChunkBoundaryScrubbing(t *test
 		t.Fatalf("expected 502 on blocked 3xx redirect, got %d", redResp.StatusCode)
 	}
 
-	// 5. /metrics exposes Prometheus counters
+	// 5. /metrics exposes Piton counters
 	mResp, err := http.Get(gw.URL + "/metrics")
 	if err != nil || mResp.StatusCode != 200 {
 		t.Fatalf("expected /metrics 200 OK")
 	}
 	mBody, _ := io.ReadAll(mResp.Body)
 	mResp.Body.Close()
-	if !strings.Contains(string(mBody), "prometheus_sidecar_secrets_redacted_total") {
+	if !strings.Contains(string(mBody), "piton_sidecar_secrets_redacted_total") {
 		t.Fatalf("expected metrics output, got: %s", string(mBody))
 	}
 }
@@ -367,7 +367,7 @@ func TestBidirectionalMCPProxyBoundsDomainBypassSmurfingMRTRAndSSERugPull(t *tes
 			"X-OBO-Principal":            "user:rep@acme.com|agent:billing-agent",
 			"Idempotency-Key":            "idem-smurf-2", // same key works because prior rejection didn't burn it!
 			"traceparent":                "00-trace-smurf-DIFFERENT-02",
-			"X-Prometheus-MRTR-Approval": approvalTok,
+			"X-Piton-MRTR-Approval": approvalTok,
 		},
 	)
 	if approved["error"] != nil || approved["result"].(map[string]any)["status"] != "refunded" {

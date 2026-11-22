@@ -1,11 +1,11 @@
 """
-Tests for Prometheus Security Engine Web, API, MCP SSE, and Cloud Endpoints.
+Tests for Piton Security Engine Web, API, MCP SSE, and Cloud Endpoints.
 """
 
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
-from prometheus.main import app
+from piton.main import app
 
 
 @pytest.mark.asyncio
@@ -15,7 +15,7 @@ async def test_healthz_endpoint():
         assert res.status_code == 200
         data = res.json()
         assert data["status"] == "healthy"
-        assert data["service"] == "prometheus-security-engine"
+        assert data["service"] == "piton-security-engine"
         assert "Gemini Enterprise Agent Platform" in data["platform"]
         assert isinstance(data["model"], str) and len(data["model"]) > 0
         assert data["mcp_enabled"] is True
@@ -36,7 +36,7 @@ async def test_dashboard_endpoint():
 
 @pytest.mark.asyncio
 async def test_mcp_sse_endpoint():
-    from prometheus.main import mcp_server
+    from piton.main import mcp_server
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         # 1. MCP initialize
@@ -44,7 +44,7 @@ async def test_mcp_sse_endpoint():
         res = await ac.post("/mcp/sse", json=init_payload)
         assert res.status_code == 200
         data = res.json()
-        assert data["result"]["serverInfo"]["name"] == "prometheus-mcp-server"
+        assert data["result"]["serverInfo"]["name"] == "piton-mcp-server"
 
         # 2. MCP tools/list
         list_payload = {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}
@@ -140,7 +140,7 @@ async def test_documentation_and_auth_endpoints():
         assert res_abac_unauth.status_code == 403
 
         # Authenticated admin request succeeds (200)
-        from prometheus.auth.oauth import create_session_token
+        from piton.auth.oauth import create_session_token
         admin_token = create_session_token(
             user_id="admin.lead",
             email="admin@enterprise.io",

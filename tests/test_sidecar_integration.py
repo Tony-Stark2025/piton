@@ -1,7 +1,7 @@
 """
-Cross-Language Go <-> Python End-to-End Integration Test for the Prometheus Agent Control Loop:
-1. `prometheus init` generates `prometheus.yaml` (shadow), `prometheus.lock`, and `.env.agent`
-2. `prometheus run -- <agent>` compiles policy, boots the static Go sidecar, strips real host
+Cross-Language Go <-> Python End-to-End Integration Test for the Piton Agent Control Loop:
+1. `piton init` generates `piton.yaml` (shadow), `piton.lock`, and `.env.agent`
+2. `piton run -- <agent>` compiles policy, boots the static Go sidecar, strips real host
    secrets from the child agent process, injects format-preserving ghost tokens, proxies real
    HTTP (/gw) and MCP (/mcp) requests, and writes HMAC-chained PII-tokenized ledger records
 3. Python `SignedDecisionLedger.verify_chain()` verifies the Go-written cryptographic chain!
@@ -16,9 +16,9 @@ import socket
 import sys
 import threading
 
-from prometheus.cli import main as cli_main
-from prometheus.iac.replay import SignedDecisionLedger, replay_traces
-from prometheus.iac.schema import (
+from piton.cli import main as cli_main
+from piton.iac.replay import SignedDecisionLedger, replay_traces
+from piton.iac.schema import (
     AgentIaCConfig,
     BoundExceededAction,
     EnforcementMode,
@@ -34,11 +34,11 @@ def _free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def test_prometheus_run_go_sidecar_and_cross_language_ledger_replay(tmp_path: Path, monkeypatch):
+def test_piton_run_go_sidecar_and_cross_language_ledger_replay(tmp_path: Path, monkeypatch):
     real_stripe_secret = "sk_live_HOST_ONLY_SECRET_987654321"
     monkeypatch.setenv("STRIPE_API_KEY", real_stripe_secret)
-    monkeypatch.setenv("PROMETHEUS_LEDGER_SIGNING_KEY", "cross-lang-hmac-secret")
-    monkeypatch.setenv("PROMETHEUS_TOKENIZER_KEY", "cross-lang-tok-secret")
+    monkeypatch.setenv("PITON_LEDGER_SIGNING_KEY", "cross-lang-hmac-secret")
+    monkeypatch.setenv("PITON_TOKENIZER_KEY", "cross-lang-tok-secret")
 
     # 1. Start a real local mock upstream (serving both /v1/invoices REST and /mcp JSON-RPC)
     received_auth_headers = []
@@ -92,7 +92,7 @@ def test_prometheus_run_go_sidecar_and_cross_language_ledger_replay(tmp_path: Pa
     t.start()
 
     try:
-        # 2. Seed mock repo and run `prometheus init`
+        # 2. Seed mock repo and run `piton init`
         (tmp_path / ".env.example").write_text("STRIPE_API_KEY=\n", encoding="utf-8")
         (tmp_path / "mcp.json").write_text(
             json.dumps(
@@ -128,7 +128,7 @@ def test_prometheus_run_go_sidecar_and_cross_language_ledger_replay(tmp_path: Pa
         assert cli_main(["init", "--repo", str(tmp_path), "--manifest", str(manifest_path)]) == 0
 
         # Point local_dev_credentials stripe_api upstream to our local test server & tighten refund max=50
-        cfg_path = tmp_path / "prometheus.yaml"
+        cfg_path = tmp_path / "piton.yaml"
         cfg = AgentIaCConfig.load_file(cfg_path)
         cfg.local_dev_credentials["stripe_api"].upstream_base_url = f"http://127.0.0.1:{upstream_port}"
         cfg.local_dev_credentials["stripe_api"].allowed_hosts = ["127.0.0.1"]
@@ -155,10 +155,10 @@ import json, os, urllib.request
 
 # (a) Zero-secret guarantee: real host secret must NOT exist in agent process env!
 agent_key = os.environ["STRIPE_API_KEY"]
-assert agent_key.startswith("sk_test_promghost_"), f"Expected ghost token, got {{agent_key}}"
+assert agent_key.startswith("sk_test_pitonghost_"), f"Expected ghost token, got {{agent_key}}"
 assert "{real_stripe_secret}" not in str(dict(os.environ)), "Real secret leaked into agent env!"
 
-gw_url = os.environ["PROMETHEUS_GATEWAY_URL"]
+gw_url = os.environ["PITON_GATEWAY_URL"]
 
 # (b) Call zero-secret /gw reverse proxy with ghost token -> response echo must be scrubbed!
 req = urllib.request.Request(
@@ -169,7 +169,7 @@ with urllib.request.urlopen(req, timeout=5) as resp:
     body = resp.read().decode("utf-8")
     assert resp.status == 200
     assert "{real_stripe_secret}" not in body, f"Secret leaked in body: {{body}}"
-    assert "[REDACTED_BY_PROMETHEUS]" in body
+    assert "[REDACTED_BY_PITON]" in body
 
 # (c) Call bidirectional MCP proxy in shadow mode (1 within $50 bound, 1 above $50 bound)
 for idx, amt in enumerate([25.5, 135.5], start=1):
@@ -201,14 +201,14 @@ for idx, amt in enumerate([25.5, 135.5], start=1):
         )
 
         sidecar_port = _free_port()
-        traces_path = tmp_path / ".prometheus" / "traces.jsonl"
-        compiled_path = tmp_path / ".prometheus" / "runtime_policy.json"
+        traces_path = tmp_path / ".piton" / "traces.jsonl"
+        compiled_path = tmp_path / ".piton" / "runtime_policy.json"
 
         rc = cli_main(
             [
                 "run",
                 "--config", str(cfg_path),
-                "--lockfile", str(tmp_path / "prometheus.lock"),
+                "--lockfile", str(tmp_path / "piton.lock"),
                 "--ghost-env", str(tmp_path / ".env.agent"),
                 "--traces", str(traces_path),
                 "--compiled-policy", str(compiled_path),

@@ -1,4 +1,4 @@
-name: Release Prometheus Sidecar & CLI
+name: Release Piton Sidecar & CLI
 
 on:
   push:
@@ -35,12 +35,12 @@ jobs:
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             GOOS="${target%/*}"
             GOARCH="${target#*/}"
-            OUT="../dist/prometheus-sidecar-${GOOS}-${GOARCH}"
+            OUT="../dist/piton-sidecar-${GOOS}-${GOARCH}"
             echo "Building ${OUT}..."
             CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" \
-              go build -trimpath -ldflags="-s -w" -o "${OUT}" ./cmd/prometheus-sidecar
+              go build -trimpath -ldflags="-s -w" -o "${OUT}" ./cmd/piton-sidecar
           done
-          (cd ../dist && sha256sum prometheus-sidecar-* > checksums.txt)
+          (cd ../dist && sha256sum piton-sidecar-* > checksums.txt)
 
       - name: Upload Binaries Artifact
         uses: actions/upload-artifact@v4
@@ -98,7 +98,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ steps.repo.outputs.owner }}/prometheus-sidecar
+          images: ghcr.io/${{ steps.repo.outputs.owner }}/piton-sidecar
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

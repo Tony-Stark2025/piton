@@ -1,20 +1,20 @@
 """
-End-to-end tests for Prometheus Rev 3 (The Focused Agent Control Loop):
+End-to-end tests for Piton Rev 3 (The Focused Agent Control Loop):
 - Day-1 MCP tool-description & schema poisoning linter
-- Split-hash MCP manifest pinning (`prometheus.lock`: structural_sha256 vs description_sha256)
+- Split-hash MCP manifest pinning (`piton.lock`: structural_sha256 vs description_sha256)
 - Cross-server tool shadowing & PR markdown diff gate
-- `prometheus init` static repo scanner & format-preserving ghost tokens
+- `piton init` static repo scanner & format-preserving ghost tokens
 - PII-preserving deterministic tokenization
 - Parameter-bounded policy evaluation (autonomous inside bounds, MRTR outside bounds)
 - Version-pinned HMAC-chained SignedDecisionLedger & tamper detection
-- Shadow-to-Enforce counterfactual `prometheus replay` calibration & CLI commands
+- Shadow-to-Enforce counterfactual `piton replay` calibration & CLI commands
 """
 
 import json
 from pathlib import Path
 
-from prometheus.cli import main as cli_main
-from prometheus.iac.lockfile import (
+from piton.cli import main as cli_main
+from piton.iac.lockfile import (
     DriftAction,
     DriftKind,
     build_lockfile_from_servers,
@@ -25,20 +25,20 @@ from prometheus.iac.lockfile import (
     render_diff_markdown,
     verify_tools_list,
 )
-from prometheus.iac.poisoning_lint import lint_tools_list
-from prometheus.iac.replay import (
+from piton.iac.poisoning_lint import lint_tools_list
+from piton.iac.replay import (
     DecisionVerdict,
     DeterministicTokenizer,
     SignedDecisionLedger,
     evaluate_tool_call_against_policy,
     replay_traces,
 )
-from prometheus.iac.scanner import (
+from piton.iac.scanner import (
     generate_format_preserving_ghost_token,
     scan_repository,
     write_init_artifacts,
 )
-from prometheus.iac.schema import (
+from piton.iac.schema import (
     AgentIaCConfig,
     AgentMeta,
     BoundExceededAction,
@@ -173,7 +173,7 @@ def test_split_hash_lockfile_distinguishes_internal_docstring_edits_from_rug_pul
     assert "vendor-mcp" in md
 
 
-def test_prometheus_init_scanner_quarantines_day1_poisoned_tools_and_mints_format_preserving_ghosts(tmp_path: Path):
+def test_piton_init_scanner_quarantines_day1_poisoned_tools_and_mints_format_preserving_ghosts(tmp_path: Path):
     # Create mock repo with .cursor/mcp.json and .env.example
     cursor_dir = tmp_path / ".cursor"
     cursor_dir.mkdir()
@@ -210,22 +210,22 @@ def test_prometheus_init_scanner_quarantines_day1_poisoned_tools_and_mints_forma
     assert res.config.mcp_servers["billing-internal"].trust_tier == TrustTier.INTERNAL
     assert res.config.mcp_servers["sketchy-vendor"].trust_tier == TrustTier.THIRD_PARTY
 
-    # Poisoned tool MUST be quarantined from prometheus.lock
+    # Poisoned tool MUST be quarantined from piton.lock
     assert "refund_invoice" in res.lockfile.servers["billing-internal"].tools
     assert "evil_helper" not in res.lockfile.servers["sketchy-vendor"].tools
     assert len(res.poisoning_findings) >= 1
 
     # Format-preserving ghost tokens satisfy real SDK format checks
-    assert res.ghost_env["STRIPE_API_KEY"].startswith("sk_test_promghost_")
-    assert res.ghost_env["GITHUB_TOKEN"].startswith("ghp_promghost")
+    assert res.ghost_env["STRIPE_API_KEY"].startswith("sk_test_pitonghost_")
+    assert res.ghost_env["GITHUB_TOKEN"].startswith("ghp_pitonghost")
     assert res.ghost_env["SLACK_BOT_TOKEN"].startswith("xoxb-")
     assert len(res.ghost_env["INTERNAL_JWT_SECRET"].split(".")) == 3
 
     written = write_init_artifacts(tmp_path, res)
-    assert written["prometheus.yaml"].is_file()
-    assert written["prometheus.lock"].is_file()
+    assert written["piton.yaml"].is_file()
+    assert written["piton.lock"].is_file()
     assert written[".env.agent"].is_file()
-    reloaded = AgentIaCConfig.load_file(written["prometheus.yaml"])
+    reloaded = AgentIaCConfig.load_file(written["piton.yaml"])
     assert reloaded.agent.id == "billing-bot"
 
 
@@ -274,7 +274,7 @@ def test_pii_preserving_tokenizer_parameter_bounds_signed_ledger_and_replay_cali
     lock, _ = build_lockfile_from_servers(
         {"billing-mcp": (TrustTier.INTERNAL, "https://mcp.internal.acme.com", _clean_billing_tools())}
     )
-    ledger_path = tmp_path / ".prometheus" / "traces.jsonl"
+    ledger_path = tmp_path / ".piton" / "traces.jsonl"
     ledger = SignedDecisionLedger(ledger_path, signing_key=b"ledger-secret", tokenizer=tokenizer)
 
     # Record 3 shadow calls: 1 within bounds ($35, acme.com), 2 above max ($75, $120)
@@ -343,32 +343,32 @@ def test_pii_preserving_tokenizer_parameter_bounds_signed_ledger_and_replay_cali
     assert "Tampered" in (err_tampered or "")
 
 
-def test_unified_prometheus_cli_end_to_end(tmp_path: Path, capsys):
+def test_unified_piton_cli_end_to_end(tmp_path: Path, capsys):
     manifest_file = tmp_path / "observed_tools.json"
     manifest_file.write_text(json.dumps({"billing-internal": _clean_billing_tools()}), encoding="utf-8")
 
-    # 1. `prometheus init`
+    # 1. `piton init`
     rc = cli_main(["init", "--repo", str(tmp_path), "--manifest", str(manifest_file)])
     assert rc == 0
-    assert (tmp_path / "prometheus.yaml").is_file()
-    assert (tmp_path / "prometheus.lock").is_file()
+    assert (tmp_path / "piton.yaml").is_file()
+    assert (tmp_path / "piton.lock").is_file()
 
-    # 2. `prometheus lock --diff` passes on clean unchanged manifest
+    # 2. `piton lock --diff` passes on clean unchanged manifest
     rc_diff = cli_main(
         [
             "lock",
             "--manifest",
             str(manifest_file),
             "--lockfile",
-            str(tmp_path / "prometheus.lock"),
+            str(tmp_path / "piton.lock"),
             "--config",
-            str(tmp_path / "prometheus.yaml"),
+            str(tmp_path / "piton.yaml"),
             "--diff",
         ]
     )
     assert rc_diff == 0
 
-    # 3. Mutate inputSchema -> `prometheus lock --diff` exits non-zero (CI gate blocks PR)
+    # 3. Mutate inputSchema -> `piton lock --diff` exits non-zero (CI gate blocks PR)
     mutated = _clean_billing_tools()
     mutated[0]["inputSchema"]["properties"]["injected_param"] = {"type": "string"}
     mutated_file = tmp_path / "mutated_tools.json"
@@ -379,9 +379,9 @@ def test_unified_prometheus_cli_end_to_end(tmp_path: Path, capsys):
             "--manifest",
             str(mutated_file),
             "--lockfile",
-            str(tmp_path / "prometheus.lock"),
+            str(tmp_path / "piton.lock"),
             "--config",
-            str(tmp_path / "prometheus.yaml"),
+            str(tmp_path / "piton.yaml"),
             "--diff",
         ]
     )
@@ -390,4 +390,4 @@ def test_unified_prometheus_cli_end_to_end(tmp_path: Path, capsys):
     assert "BLOCKED" in out
 
     # 4. Ghost token helper sanity
-    assert generate_format_preserving_ghost_token("stripe_live").startswith("sk_live_promghost_")
+    assert generate_format_preserving_ghost_token("stripe_live").startswith("sk_live_pitonghost_")

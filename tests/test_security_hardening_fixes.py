@@ -1,5 +1,5 @@
 """
-Security Hardening Regression Test Suite for Prometheus Enterprise.
+Security Hardening Regression Test Suite for Piton.
 Verifies remediation of all critical and high vulnerabilities identified in the Nov 2026 audit:
 1. Unauthenticated access & non-admin privilege escalation on SaaS, Proxy, Jobs, ABAC, and SWE-Patch routes.
 2. LFI path traversal in /api/v1/pentest/swe-patch.
@@ -17,12 +17,12 @@ import asyncio
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from prometheus.config import settings
-from prometheus.main import app, _ASYNC_SCAN_JOBS
-from prometheus.pentest.ast_patcher import TypeScriptPatchSynthesizer
-from prometheus.pentest.cegis_verifier import DualPassVerifier
-from prometheus.pentest.exploit_prober import ExploitProber
-from prometheus.pentest.models import (
+from piton.config import settings
+from piton.main import app, _ASYNC_SCAN_JOBS
+from piton.pentest.ast_patcher import TypeScriptPatchSynthesizer
+from piton.pentest.cegis_verifier import DualPassVerifier
+from piton.pentest.exploit_prober import ExploitProber
+from piton.pentest.models import (
     AutoPatchResult,
     DualTenantContext,
     ExploitProof,
@@ -32,13 +32,13 @@ from prometheus.pentest.models import (
     TenantIdentity,
     VulnerabilityCategory,
 )
-from prometheus.proxy.hypervisor import ToolExecutionHypervisor
-from prometheus.proxy.models import ProxyToolRequest, ToolCallType
-from prometheus.proxy.state_invariants import StateWitnessRegistry
-from prometheus.proxy.token_authority import TokenAuthority
-from prometheus.mcp.server import PrometheusMCPServer
-from prometheus.saas.engine import SaaSPlatformEngine
-from prometheus.security.agentic_owasp import OWASPAgenticEngine
+from piton.proxy.hypervisor import ToolExecutionHypervisor
+from piton.proxy.models import ProxyToolRequest, ToolCallType
+from piton.proxy.state_invariants import StateWitnessRegistry
+from piton.proxy.token_authority import TokenAuthority
+from piton.mcp.server import PitonMCPServer
+from piton.saas.engine import SaaSPlatformEngine
+from piton.security.agentic_owasp import OWASPAgenticEngine
 
 
 @pytest.mark.asyncio
@@ -337,12 +337,12 @@ async def test_cegis_verifier_never_fakes_remote_403_200():
 
 
 def test_mcp_server_defaults_fail_closed():
-    srv = PrometheusMCPServer()
+    srv = PitonMCPServer()
     assert srv.enforce_hypervisor is True
 
 
 def test_in_vpc_rfc1918_opt_in_still_blocks_cloud_metadata():
-    from prometheus.pentest.exploit_prober import validate_ssrf, SSRFValidationError
+    from piton.pentest.exploit_prober import validate_ssrf, SSRFValidationError
 
     # Default blocks RFC1918
     with pytest.raises(SSRFValidationError):
@@ -357,8 +357,8 @@ def test_in_vpc_rfc1918_opt_in_still_blocks_cloud_metadata():
 
 
 def test_proof_validator_strips_caller_reflection_and_noop_mutations():
-    from prometheus.pentest.proof_validator import ProofValidator
-    from prometheus.pentest.models import ExploitProbeRequest
+    from piton.pentest.proof_validator import ProofValidator
+    from piton.pentest.models import ExploitProbeRequest
 
     validator = ProofValidator()
     # Echoing attacker-supplied URL param must NOT trigger BOLA FP
@@ -399,7 +399,7 @@ def test_proof_validator_strips_caller_reflection_and_noop_mutations():
 
 
 def test_openapi_ref_and_allof_dereferencing():
-    from prometheus.pentest.pr_ingestor import OpenAPIngestor
+    from piton.pentest.pr_ingestor import OpenAPIngestor
 
     spec = {
         "openapi": "3.0.3",

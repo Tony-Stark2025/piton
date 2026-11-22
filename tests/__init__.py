@@ -1,3 +1,3 @@
 """
-Prometheus Test Suite Package.
+Piton Test Suite Package.
 """

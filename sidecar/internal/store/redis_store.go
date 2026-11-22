@@ -1,5 +1,5 @@
 // Package store provides optional distributed Redis/Valkey state backing for
-// multi-replica Kubernetes deployments of prometheus-sidecar so idempotency keys,
+// multi-replica Kubernetes deployments of piton-sidecar so idempotency keys,
 // per-trace call counters, and rolling 1-hour per-principal budgets cannot be
 // multiplied across sidecar replicas.
 //
@@ -44,7 +44,7 @@ type RedisStore struct {
 
 func NewRedisStore(addr, password, prefix string) *RedisStore {
 	if prefix == "" {
-		prefix = "prometheus:"
+		prefix = "piton:"
 	}
 	return &RedisStore{
 		addr:     strings.TrimSpace(addr),

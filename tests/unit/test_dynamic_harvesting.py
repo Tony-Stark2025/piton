@@ -4,7 +4,7 @@ Verifies:
 1. Producer (POST) and listing (GET) endpoint inspection and dynamic resource harvesting.
 2. Dynamic canary derivation from payload and victim identifying markers (tenant_id, organization_id, user_id).
 3. Elimination of rigid fallbacks to 'invoice' / 'inv-alpha-992' and 'CONFIDENTIAL_PAYROLL_DATA_ALPHA_8832'.
-4. Integration with PrometheusAdversarialEngine and ProofValidator with zero false negatives on arbitrary APIs.
+4. Integration with PitonAdversarialEngine and ProofValidator with zero false negatives on arbitrary APIs.
 """
 
 from typing import Dict, Optional
@@ -13,10 +13,10 @@ import pytest
 from fastapi import Depends, FastAPI, HTTPException, Header, status
 from pydantic import BaseModel
 
-from prometheus.pentest.engine import PrometheusAdversarialEngine
-from prometheus.pentest.exploit_prober import ExploitProber
+from piton.pentest.engine import PitonAdversarialEngine
+from piton.pentest.exploit_prober import ExploitProber
 import jwt
-from prometheus.pentest.models import (
+from piton.pentest.models import (
     DualTenantContext,
     ExploitProbeRequest,
     HttpMethod,
@@ -24,8 +24,8 @@ from prometheus.pentest.models import (
     Severity,
     VulnerabilityCategory,
 )
-from prometheus.pentest.proof_validator import ProofValidator
-from prometheus.pentest.state_synthesizer import StateSynthesizer
+from piton.pentest.proof_validator import ProofValidator
+from piton.pentest.state_synthesizer import StateSynthesizer
 
 
 # --- Test FastAPI Microservice with Arbitrary Domain Entities ---
@@ -256,7 +256,7 @@ async def test_harvest_resources_from_endpoints():
 @pytest.mark.asyncio
 async def test_dynamic_resource_harvesting_in_adversarial_engine():
     """
-    End-to-end verification that PrometheusAdversarialEngine dynamically harvests
+    End-to-end verification that PitonAdversarialEngine dynamically harvests
     victim resources before running attack hypotheses, without any pre-seeded invoice/payroll defaults.
     """
     synthesizer = StateSynthesizer()
@@ -277,7 +277,7 @@ async def test_dynamic_resource_harvesting_in_adversarial_engine():
         RouteEndpoint(path="/api/v1/admin/clusters/{cluster_id}", method=HttpMethod.DELETE, path_parameters=["cluster_id"]),
     ]
 
-    engine = PrometheusAdversarialEngine(
+    engine = PitonAdversarialEngine(
         base_url="http://testserver",
         endpoints=endpoints,
         context=context,

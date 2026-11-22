@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "prometheus-enterprise"
+name = "piton"
 version = "0.3.0"
 description = "Piton — The package-lock.json & supply-chain firewall for AI coding agents (split-hash MCP pinning, Claude/Cursor hook RCE linting, shadow replay -> CEL/Cedar & Envoy v3 ext_proc sidecar)"
 readme = "README.md"
@@ -36,9 +36,8 @@ dev = [
 ]
 
 [project.scripts]
-piton = "prometheus.cli:main"
-prometheus = "prometheus.cli:main"
-prometheus-scan = "prometheus.cli_scan:main"
+piton = "piton.cli:main"
+piton-scan = "piton.cli_scan:main"
 
 [tool.setuptools.packages.find]
-include = ["prometheus*"]
+include = ["piton*"]

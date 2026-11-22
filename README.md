@@ -15,7 +15,7 @@ Every AI coding agent (`Claude Code`, `Cursor`, `Claude Desktop`, `OpenCode`) no
 Slim Python CLI — **only 2 runtime dependencies (`pydantic` + `pyyaml`)**:
 
 ```bash
-pip install "git+https://github.com/Tony-Stark2025/prometheus-enterprise.git@v0.3.0"
+pip install "git+https://github.com/Tony-Stark2025/piton.git@v0.3.0"
 
 # 1. Zero-config scan: catches .claude/settings.json hook RCE, .vscode/tasks.json folderOpen autorun,
 #    and hidden-Unicode / prompt-injection poisoning in .cursor/rules, CLAUDE.md, and skills
@@ -33,7 +33,7 @@ piton wrap --server github -- npx -y @modelcontextprotocol/server-github
 
 ```yaml
 - name: Piton — AI Agent Supply-Chain & MCP Lockfile Gate
-  uses: Tony-Stark2025/prometheus-enterprise@v0.3.0
+  uses: Tony-Stark2025/piton@v0.3.0
   with:
     probe: "true" # or `manifest: observed_tools.json`, or `scan-only: "true"`
 ```
@@ -54,11 +54,11 @@ Fails pull requests loudly on:
 
 ```bash
 # Calibrate bounds offline against shadow traces or OTel spans until false-block rate = 0%
-piton replay --config piton.yaml --traces .prometheus/traces.jsonl --simulate-enforce
+piton replay --config piton.yaml --traces .piton/traces.jsonl --simulate-enforce
 
 # Export calibrated policies directly to agentgateway (CEL) or ToolHive / AWS AgentCore (Cedar)
-piton replay --config piton.yaml --traces .prometheus/traces.jsonl --export cel
-piton replay --config piton.yaml --traces .prometheus/traces.jsonl --export cedar
+piton replay --config piton.yaml --traces .piton/traces.jsonl --export cel
+piton replay --config piton.yaml --traces .piton/traces.jsonl --export cedar
 ```
 
 ---
@@ -68,8 +68,8 @@ piton replay --config piton.yaml --traces .prometheus/traces.jsonl --export ceda
 Runs live Day-1 poisoning quarantine, zero-secret `/gw` egress key swapping + chunk-boundary response secret scrubbing, shadow recording, Go↔Python HMAC ledger verification, and `replay` calibration with zero external API keys:
 
 ```bash
-git clone https://github.com/Tony-Stark2025/prometheus-enterprise.git
-cd prometheus-enterprise
+git clone https://github.com/Tony-Stark2025/piton.git
+cd piton
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 bash examples/quickstart-billing-agent/run_demo.sh
@@ -103,8 +103,8 @@ When you move from local coding agents and CI gates into production multi-agent 
 ### Kubernetes + Envoy Gateway Deployment (Helm)
 
 ```bash
-helm install piton-sidecar ./deploy/helm/prometheus-sidecar \
-  --set image.repository=ghcr.io/tony-stark2025/prometheus-sidecar \
+helm install piton-sidecar ./deploy/helm/piton-sidecar \
+  --set image.repository=ghcr.io/tony-stark2025/piton-sidecar \
   --set secrets.existingSecret=piton-sidecar-keys \
   --set redis.enabled=true \
   --set redis.addr=redis-master.default.svc.cluster.local:6379 \
@@ -128,19 +128,17 @@ docker compose down -v
 
 ```bash
 # Terminal 1: Start central Governance UI, Fleet Ledger Collector & MRTR Slack/Web Approval Bridge
-PROMETHEUS_LEDGER_SIGNING_KEY="dev-secret-key-32-bytes-minimum" \
+PITON_LEDGER_SIGNING_KEY="dev-secret-key-32-bytes-minimum" \
   piton control-plane --host 127.0.0.1 --port 8090
 
 # Terminal 2: Run agent with zero real secrets in env, streaming telemetry & escalations to Control Plane
-PROMETHEUS_LEDGER_SIGNING_KEY="dev-secret-key-32-bytes-minimum" \
+PITON_LEDGER_SIGNING_KEY="dev-secret-key-32-bytes-minimum" \
   piton run --collector-url http://127.0.0.1:8090 -- python my_agent.py
 ```
 
 ---
 
 ## CLI Reference
-
-*(Backward-compatible alias: `prometheus` invokes the exact same CLI.)*
 
 ```bash
 piton scan --repo .                                         # Scan Claude/Cursor hooks, tasks, rules & skills
@@ -150,8 +148,8 @@ piton lock --update [--probe | --manifest tools.json]       # Refresh approved l
 piton wrap --server <name> -- <stdio-mcp-cmd>               # Runtime STDIO pin & bounds for Cursor / Claude Code
 piton replay --simulate-enforce [--export cel|cedar]        # Calibrate bounds from ledger or OTel spans
 piton run [--collector-url URL] -- <agent-cmd>              # Zero-secret local agent runner (auto-fetches sidecar)
-piton top --traces .prometheus/traces.jsonl [--follow]      # Live PII-tokenized flight recorder
-piton ledger-verify --traces .prometheus/traces.jsonl       # Verify Go↔Python HMAC chain integrity
+piton top --traces .piton/traces.jsonl [--follow]      # Live PII-tokenized flight recorder
+piton ledger-verify --traces .piton/traces.jsonl       # Verify Go↔Python HMAC chain integrity
 piton control-plane --host 127.0.0.1 --port 8090            # Fleet ledger collector, MRTR bridge & SOC2 export UI
 ```
 

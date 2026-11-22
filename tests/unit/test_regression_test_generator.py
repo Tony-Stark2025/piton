@@ -1,5 +1,5 @@
 """
-Unit tests for Prometheus Automated Regression Test Synthesizer.
+Unit tests for Piton Automated Regression Test Synthesizer.
 Verifies autonomous synthesis of runnable Python (pytest with httpx & requests)
 and TypeScript (vitest & jest with fetch) regression tests.
 """
@@ -8,15 +8,15 @@ import ast
 import json
 import pytest
 
-from prometheus.pentest.models import (
+from piton.pentest.models import (
     AutoPatchResult,
     ExploitProof,
     HttpMethod,
     Severity,
     VulnerabilityCategory,
 )
-from prometheus.pentest.pr_reporter import PRReporter
-from prometheus.pentest.regression_test_generator import RegressionTestGenerator
+from piton.pentest.pr_reporter import PRReporter
+from piton.pentest.regression_test_generator import RegressionTestGenerator
 
 
 def test_generate_pytest_httpx_syntax_and_assertions():

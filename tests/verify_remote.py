@@ -18,7 +18,7 @@ if PROJECT_ROOT not in sys.path:
 
 import vertexai
 from vertexai.preview import reasoning_engines
-from prometheus.config import settings
+from piton.config import settings
 
 PROJECT_ID = settings.gcp_project_id or "gen-lang-client-0942141479"
 LOCATION = settings.gcp_location or "us-central1"

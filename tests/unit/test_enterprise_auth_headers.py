@@ -1,5 +1,5 @@
 """
-Unit tests for Prometheus Enterprise IdP Authentication Headers.
+Unit tests for Piton IdP Authentication Headers.
 Verifies custom Bearer / Okta / Keycloak auth header injection and HS256 JWT bypass.
 """
 
@@ -9,9 +9,9 @@ import jwt
 import pytest
 import httpx
 
-from prometheus.pentest.benchmark_app import app as benchmark_fastapi_app
-from prometheus.pentest.state_synthesizer import StateSynthesizer
-from prometheus.cli_scan import run_scan
+from piton.pentest.benchmark_app import app as benchmark_fastapi_app
+from piton.pentest.state_synthesizer import StateSynthesizer
+from piton.cli_scan import run_scan
 
 
 def test_state_synthesizer_bypasses_jwt_for_alpha():
@@ -105,7 +105,7 @@ def test_state_synthesizer_extracts_claims_from_enterprise_jwt():
 
 
 def test_cli_scan_parser_accepts_auth_header_args():
-    from prometheus.cli_scan import build_parser
+    from piton.cli_scan import build_parser
 
     parser = build_parser()
     parsed = parser.parse_args([
@@ -187,7 +187,7 @@ async def test_run_scan_with_github_step_summary_and_ts_export(tmp_path):
         assert exit_code == 0
         assert step_summary_file.exists()
         summary_content = step_summary_file.read_text(encoding="utf-8")
-        assert "Prometheus Autonomous Security Gate Summary" in summary_content
+        assert "Piton Autonomous Security Gate Summary" in summary_content
         # If vulnerabilities were found, regression test was written and embedded in summary
         if ts_test_file.exists():
             ts_content = ts_test_file.read_text(encoding="utf-8")

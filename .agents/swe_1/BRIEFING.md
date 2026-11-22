@@ -1,18 +1,18 @@
 ﻿# BRIEFING — 2026-08-25T21:59:00Z
 
 ## Mission
-Execute single self-contained deployment and verification fix for Prometheus on Vertex AI Agent Engine (gen-lang-client-0942141479, us-central1), test query telemetry, local & cloud endpoints, and ensure 100% pytest pass.
+Execute single self-contained deployment and verification fix for Piton on Vertex AI Agent Engine (gen-lang-client-0942141479, us-central1), test query telemetry, local & cloud endpoints, and ensure 100% pytest pass.
 
 ## 🔒 My Identity
 - Archetype: swe_orchestrator
 - Roles: orchestrator, user_liaison, human_reporter, successor
-- Working directory: c:\Users\brigh\project\prometheus\.agents\swe_1
+- Working directory: c:\Users\brigh\project\piton\.agents\swe_1
 - Original parent: parent
 - Original parent conversation ID: 8191b334-1f0e-4840-b820-03aa5493c31f
 
 ## 🔒 My Workflow
 - **Pattern**: SWE Light
-- **Scope document**: c:\Users\brigh\project\prometheus\.agents\ORIGINAL_REQUEST.md
+- **Scope document**: c:\Users\brigh\project\piton\.agents\ORIGINAL_REQUEST.md
 1. **Decompose**: No decomposition (SWE Light pattern). Whole task dispatched sequentially.
 2. **Dispatch & Execute**:
    - Implementer -> Reviewer 1 -> Reviewer 2 -> Reviewer 3 -> Victory Auditor
@@ -65,6 +65,6 @@ Execute single self-contained deployment and verification fix for Prometheus on 
 - Safety timer: bbceaa6c-6011-420d-a032-3da6eec58694/task-204
 
 ## Artifact Index
-- c:\Users\brigh\project\prometheus\.agents\ORIGINAL_REQUEST.md — Original User Request
-- c:\Users\brigh\project\prometheus\.agents\swe_1\DISPATCH.md — Dispatch log
-- c:\Users\brigh\project\prometheus\.agents\swe_1\progress.md — Liveness & Progress
+- c:\Users\brigh\project\piton\.agents\ORIGINAL_REQUEST.md — Original User Request
+- c:\Users\brigh\project\piton\.agents\swe_1\DISPATCH.md — Dispatch log
+- c:\Users\brigh\project\piton\.agents\swe_1\progress.md — Liveness & Progress

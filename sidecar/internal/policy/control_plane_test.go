@@ -17,7 +17,7 @@ func TestResponseProjectionAndAsyncControlPlaneBridge(t *testing.T) {
 	cp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
-		seenAPIKey = r.Header.Get("X-Prometheus-Control-Key")
+		seenAPIKey = r.Header.Get("X-Piton-Control-Key")
 		switch r.URL.Path {
 		case "/api/v1/ledger/ingest":
 			ledgerCount++
@@ -103,7 +103,7 @@ func TestResponseProjectionAndAsyncControlPlaneBridge(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if seenAPIKey != "cp-secret-key" {
-		t.Fatalf("expected X-Prometheus-Control-Key header, got %q", seenAPIKey)
+		t.Fatalf("expected X-Piton-Control-Key header, got %q", seenAPIKey)
 	}
 	if ledgerCount != 1 || mrtrCount != 1 || driftCount != 1 {
 		t.Fatalf("expected 1 ledger, 1 mrtr, 1 drift event; got ledger=%d mrtr=%d drift=%d", ledgerCount, mrtrCount, driftCount)

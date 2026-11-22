@@ -9,11 +9,11 @@ import subprocess
 import sys
 import pytest
 
-from prometheus.cli_scan import terminate_process_tree
-from prometheus.pentest.exploit_prober import ExploitProber, SSRFValidationError, validate_ssrf
-from prometheus.pentest.models import ExploitProbeRequest, HttpMethod, VulnerabilityCategory
-from prometheus.pentest.proof_validator import ProofValidator
-from prometheus.pentest.pr_reporter import PRReporter
+from piton.cli_scan import terminate_process_tree
+from piton.pentest.exploit_prober import ExploitProber, SSRFValidationError, validate_ssrf
+from piton.pentest.models import ExploitProbeRequest, HttpMethod, VulnerabilityCategory
+from piton.pentest.proof_validator import ProofValidator
+from piton.pentest.pr_reporter import PRReporter
 
 
 def test_ssrf_blocks_ipv6_mapped_ipv4_metadata():
@@ -128,8 +128,8 @@ def test_terminate_process_tree_noop_on_none():
 @pytest.mark.asyncio
 async def test_admin_dependency_fails_closed(monkeypatch):
     from fastapi import HTTPException
-    from prometheus.auth.dependencies import get_current_admin_user, UserContext
-    from prometheus.config import settings
+    from piton.auth.dependencies import get_current_admin_user, UserContext
+    from piton.config import settings
 
     monkeypatch.setattr(settings, "allow_insecure_admin", False)
     non_admin_user = UserContext(user_id="normal-user", roles=["developer"])
@@ -177,8 +177,8 @@ def test_ssrf_disentangles_loopback_from_rfc1918_private():
 @pytest.mark.asyncio
 async def test_persona_endpoint_locked_outside_development(monkeypatch):
     from httpx import AsyncClient, ASGITransport
-    from prometheus.main import app
-    from prometheus.config import settings
+    from piton.main import app
+    from piton.config import settings
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         # 1. In production -> 403 Forbidden
@@ -201,7 +201,7 @@ async def test_persona_endpoint_locked_outside_development(monkeypatch):
 
 
 def test_token_authority_tenant_confinement_attenuation():
-    from prometheus.proxy.token_authority import TokenAuthority, AttenuationViolationError
+    from piton.proxy.token_authority import TokenAuthority, AttenuationViolationError
     ta = TokenAuthority()
 
     # Mint unconfined root token
@@ -233,7 +233,7 @@ def test_token_authority_tenant_confinement_attenuation():
 
 
 def test_state_invariant_nested_resource_id_extraction():
-    from prometheus.proxy.state_invariants import StateInvariantGate
+    from piton.proxy.state_invariants import StateInvariantGate
 
     # Direct top-level
     assert StateInvariantGate.extract_resource_id_from_body_or_query(
@@ -258,9 +258,9 @@ def test_state_invariant_nested_resource_id_extraction():
 
 @pytest.mark.asyncio
 async def test_agent_handles_unbound_hypothesis_safely():
-    from prometheus.pentest.agent import AutonomousExploitAgent, AttackHypothesis
-    from prometheus.pentest.models import RouteEndpoint
-    from prometheus.pentest.state_synthesizer import StateSynthesizer
+    from piton.pentest.agent import AutonomousExploitAgent, AttackHypothesis
+    from piton.pentest.models import RouteEndpoint
+    from piton.pentest.state_synthesizer import StateSynthesizer
 
     synth = StateSynthesizer()
     ctx = synth.create_dual_context()

@@ -58,5 +58,5 @@ data/
 *_pr_comment.md
 *_auto_fix.patch
 sidecar/bin/
-.prometheus/
+.piton/
 

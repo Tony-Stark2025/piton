@@ -1,6 +1,6 @@
 
 import pytest
-from prometheus.memory.firestore_store import FirestoreStore, UserProfile
+from piton.memory.firestore_store import FirestoreStore, UserProfile
 
 @pytest.mark.asyncio
 async def test_firestore_store_user_and_integration_lifecycle():

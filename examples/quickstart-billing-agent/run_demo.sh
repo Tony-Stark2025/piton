@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 60-Second End-to-End Prometheus Agent Control Loop Demo
+# 60-Second End-to-End Piton Agent Control Loop Demo
 # Runs the exact CLI commands a real developer/platform engineer runs.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,19 +14,19 @@ cp "${SCRIPT_DIR}/mcp.json" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/observed_manifest.json" "${WORK_DIR}/"
 cp "${SCRIPT_DIR}/billing_agent.py" "${WORK_DIR}/"
 
-# Pick prometheus CLI from active venv or PATH
-if [[ -x "${REPO_ROOT}/.venv/bin/prometheus" ]]; then
-  PROM="${REPO_ROOT}/.venv/bin/prometheus"
+# Pick piton CLI from active venv or PATH
+if [[ -x "${REPO_ROOT}/.venv/bin/piton" ]]; then
+  PROM="${REPO_ROOT}/.venv/bin/piton"
   PY="${REPO_ROOT}/.venv/bin/python"
 else
-  PROM="prometheus"
+  PROM="piton"
   PY="python3"
 fi
 
 # Host holds the real secret; the child agent will NEVER see it.
 export STRIPE_API_KEY="sk_live_REAL_HOST_SECRET_DEMO_999"
-export PROMETHEUS_LEDGER_SIGNING_KEY="demo-hmac-signing-key"
-export PROMETHEUS_TOKENIZER_KEY="demo-pii-tokenizer-key"
+export PITON_LEDGER_SIGNING_KEY="demo-hmac-signing-key"
+export PITON_TOKENIZER_KEY="demo-pii-tokenizer-key"
 
 echo "======================================================================"
 echo " 1) Booting local mock Stripe + MCP upstreams (port 19001)"
@@ -37,7 +37,7 @@ sleep 0.5
 
 echo ""
 echo "======================================================================"
-echo " 2) prometheus init — Discover MCPs, Quarantine Day-1 Poisoned Tools"
+echo " 2) piton init — Discover MCPs, Quarantine Day-1 Poisoned Tools"
 echo "======================================================================"
 # Exit code 2 is expected because observed_manifest.json includes 1 Day-1 poisoned tool
 "${PROM}" init \
@@ -48,9 +48,9 @@ echo "======================================================================"
 # Point the demo's local_dev stripe slot to our local mock upstream & tighten initial refund max to $50
 "${PY}" - <<PY
 from pathlib import Path
-from prometheus.iac.schema import AgentIaCConfig, ParameterBound, ToolPolicy, ToolTier, BoundExceededAction
+from piton.iac.schema import AgentIaCConfig, ParameterBound, ToolPolicy, ToolTier, BoundExceededAction
 
-cfg_path = Path("${WORK_DIR}/prometheus.yaml")
+cfg_path = Path("${WORK_DIR}/piton.yaml")
 cfg = AgentIaCConfig.load_file(cfg_path)
 cfg.local_dev_credentials["stripe_api"].upstream_base_url = "http://127.0.0.1:19001"
 cfg.local_dev_credentials["stripe_api"].allowed_hosts = ["127.0.0.1"]
@@ -69,36 +69,36 @@ PY
 
 echo ""
 echo "======================================================================"
-echo " 3) prometheus run — Boot Go Sidecar, Strip Real Secrets, Run Agent"
+echo " 3) piton run — Boot Go Sidecar, Strip Real Secrets, Run Agent"
 echo "======================================================================"
 "${PROM}" run \
-  --config "${WORK_DIR}/prometheus.yaml" \
-  --lockfile "${WORK_DIR}/prometheus.lock" \
+  --config "${WORK_DIR}/piton.yaml" \
+  --lockfile "${WORK_DIR}/piton.lock" \
   --ghost-env "${WORK_DIR}/.env.agent" \
-  --traces "${WORK_DIR}/.prometheus/traces.jsonl" \
-  --compiled-policy "${WORK_DIR}/.prometheus/runtime_policy.json" \
+  --traces "${WORK_DIR}/.piton/traces.jsonl" \
+  --compiled-policy "${WORK_DIR}/.piton/runtime_policy.json" \
   --addr 127.0.0.1:18080 \
   -- "${PY}" "${WORK_DIR}/billing_agent.py"
 
 echo ""
 echo "======================================================================"
-echo " 4) prometheus top — Flight Recorder (PII-Tokenized Live Ledger)"
+echo " 4) piton top — Flight Recorder (PII-Tokenized Live Ledger)"
 echo "======================================================================"
-"${PROM}" top --traces "${WORK_DIR}/.prometheus/traces.jsonl"
+"${PROM}" top --traces "${WORK_DIR}/.piton/traces.jsonl"
 
 echo ""
 echo "======================================================================"
-echo " 5) prometheus ledger-verify — Cross-Language Go->Python HMAC Check"
+echo " 5) piton ledger-verify — Cross-Language Go->Python HMAC Check"
 echo "======================================================================"
-"${PROM}" ledger-verify --traces "${WORK_DIR}/.prometheus/traces.jsonl"
+"${PROM}" ledger-verify --traces "${WORK_DIR}/.piton/traces.jsonl"
 
 echo ""
 echo "======================================================================"
-echo " 6) prometheus replay — Calibrate Shadow -> Enforce Before Flipping"
+echo " 6) piton replay — Calibrate Shadow -> Enforce Before Flipping"
 echo "======================================================================"
 "${PROM}" replay \
-  --config "${WORK_DIR}/prometheus.yaml" \
-  --traces "${WORK_DIR}/.prometheus/traces.jsonl" \
+  --config "${WORK_DIR}/piton.yaml" \
+  --traces "${WORK_DIR}/.piton/traces.jsonl" \
   --simulate-enforce
 
 echo ""

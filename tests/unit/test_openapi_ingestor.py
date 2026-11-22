@@ -2,9 +2,9 @@
 Unit tests for OpenAPI Route Ingestor.
 """
 
-from prometheus.pentest.benchmark_app import app
-from prometheus.pentest.models import HttpMethod
-from prometheus.pentest.pr_ingestor import OpenAPIngestor
+from piton.pentest.benchmark_app import app
+from piton.pentest.models import HttpMethod
+from piton.pentest.pr_ingestor import OpenAPIngestor
 
 
 def test_parse_benchmark_openapi_spec():

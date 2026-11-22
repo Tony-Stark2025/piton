@@ -6,7 +6,7 @@ Validates live Cloud Run HTTP/SSE endpoints or FastAPI application container loc
 import pytest
 import os
 from starlette.testclient import TestClient
-from prometheus.main import app
+from piton.main import app
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ class TestCloudRunRemote:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "healthy"
-        assert data["service"] == "prometheus-security-engine"
+        assert data["service"] == "piton-security-engine"
         assert data["mcp_enabled"] is True
 
     def test_dashboard_and_root_endpoints(self, client):
@@ -30,12 +30,12 @@ class TestCloudRunRemote:
         resp_root = client.get("/")
         assert resp_root.status_code == 200
         assert "text/html" in resp_root.headers.get("content-type", "")
-        assert "Prometheus" in resp_root.text
+        assert "Piton" in resp_root.text
 
         resp_dash = client.get("/dashboard")
         assert resp_dash.status_code == 200
         assert "text/html" in resp_dash.headers.get("content-type", "")
-        assert "Prometheus" in resp_dash.text
+        assert "Piton" in resp_dash.text
 
     def test_security_overview_endpoint(self, client):
         """Verifies /api/v1/security/overview exposes hypervisor metrics and ABAC audit stats."""

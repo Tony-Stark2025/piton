@@ -1,21 +1,21 @@
 """
-Zero-duplication compatibility alias package (`app` -> `prometheus`).
-Maps all `app.*` imports directly to the canonical `prometheus.*` modules and singletons.
+Zero-duplication compatibility alias package (`app` -> `piton`).
+Maps all `app.*` imports directly to the canonical `piton.*` modules and singletons.
 """
 
 import importlib
 import importlib.abc
 import importlib.machinery
 import sys
-import prometheus
+import piton
 
 
-class _PrometheusAliasFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    """Dynamically aliases `app.<submodule>` to `prometheus.<submodule>` in `sys.modules`."""
+class _PitonAliasFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """Dynamically aliases `app.<submodule>` to `piton.<submodule>` in `sys.modules`."""
 
     def find_spec(self, fullname: str, path=None, target=None):
         if fullname == "app" or fullname.startswith("app."):
-            prom_name = "prometheus" + fullname[3:]
+            prom_name = "piton" + fullname[3:]
             prom_spec = importlib.util.find_spec(prom_name)
             if prom_spec is not None:
                 return importlib.machinery.ModuleSpec(
@@ -26,7 +26,7 @@ class _PrometheusAliasFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader)
         return None
 
     def load_module(self, fullname: str):
-        prom_name = "prometheus" + fullname[3:]
+        prom_name = "piton" + fullname[3:]
         mod = importlib.import_module(prom_name)
         sys.modules[fullname] = mod
         if "." in fullname:
@@ -37,10 +37,10 @@ class _PrometheusAliasFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader)
         return mod
 
 
-if not any(isinstance(f, _PrometheusAliasFinder) for f in sys.meta_path):
-    sys.meta_path.insert(0, _PrometheusAliasFinder())
+if not any(isinstance(f, _PitonAliasFinder) for f in sys.meta_path):
+    sys.meta_path.insert(0, _PitonAliasFinder())
 
-# Expose top-level attributes from prometheus
-for _k, _v in prometheus.__dict__.items():
+# Expose top-level attributes from piton
+for _k, _v in piton.__dict__.items():
     if not _k.startswith("__"):
         globals()[_k] = _v

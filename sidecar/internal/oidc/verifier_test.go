@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/oidc"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/oidc"
 )
 
 func b64url(b []byte) string {
@@ -124,14 +124,14 @@ func TestOIDCVerifierRS256ES256RotationAndFailClosedAttacks(t *testing.T) {
 
 	verifier := oidc.NewVerifier(oidc.VerifierConfig{
 		Issuer:   idpSrv.URL,
-		Audience: "prometheus-mcp-gateway",
+		Audience: "piton-mcp-gateway",
 	})
 	ctx := context.Background()
 
 	// 1. Valid RS256 RFC 8693 OBO token (`sub` + `act.sub`) passes via OIDC discovery
 	validRS := signRS256(t, rsaKey1, "rsa-k1", map[string]any{
 		"iss": idpSrv.URL,
-		"aud": []string{"prometheus-mcp-gateway"},
+		"aud": []string{"piton-mcp-gateway"},
 		"sub": "alice@acme.com",
 		"act": map[string]any{"sub": "billing-agent"},
 		"exp": time.Now().Add(5 * time.Minute).Unix(),
@@ -147,7 +147,7 @@ func TestOIDCVerifierRS256ES256RotationAndFailClosedAttacks(t *testing.T) {
 	// 2. Valid ES256 token passes
 	validES := signES256(t, ecKey, "ec-k1", map[string]any{
 		"iss": idpSrv.URL,
-		"aud": "prometheus-mcp-gateway",
+		"aud": "piton-mcp-gateway",
 		"sub": "bob@acme.com",
 		"azp": "support-bot",
 		"exp": time.Now().Add(5 * time.Minute).Unix(),
@@ -159,7 +159,7 @@ func TestOIDCVerifierRS256ES256RotationAndFailClosedAttacks(t *testing.T) {
 
 	// 3. Rejects `alg: none` forgery
 	noneHdr, _ := json.Marshal(map[string]any{"alg": "none", "typ": "JWT"})
-	nonePay, _ := json.Marshal(map[string]any{"iss": idpSrv.URL, "aud": "prometheus-mcp-gateway", "sub": "admin", "exp": time.Now().Add(time.Hour).Unix()})
+	nonePay, _ := json.Marshal(map[string]any{"iss": idpSrv.URL, "aud": "piton-mcp-gateway", "sub": "admin", "exp": time.Now().Add(time.Hour).Unix()})
 	if _, err := verifier.VerifyToken(ctx, b64url(noneHdr)+"."+b64url(nonePay)+"."); err == nil {
 		t.Fatalf("expected alg:none token to be rejected")
 	}
@@ -173,7 +173,7 @@ func TestOIDCVerifierRS256ES256RotationAndFailClosedAttacks(t *testing.T) {
 	// 5. Rejects expired token
 	expiredTok := signRS256(t, rsaKey1, "rsa-k1", map[string]any{
 		"iss": idpSrv.URL,
-		"aud": "prometheus-mcp-gateway",
+		"aud": "piton-mcp-gateway",
 		"sub": "alice@acme.com",
 		"exp": time.Now().Add(-2 * time.Minute).Unix(),
 	})
@@ -198,14 +198,14 @@ func TestOIDCVerifierRS256ES256RotationAndFailClosedAttacks(t *testing.T) {
 	mu.Unlock()
 	rotatedTok := signRS256(t, rsaKey2, "rsa-k2", map[string]any{
 		"iss": idpSrv.URL,
-		"aud": "prometheus-mcp-gateway",
+		"aud": "piton-mcp-gateway",
 		"sub": "carol@acme.com",
 		"exp": time.Now().Add(5 * time.Minute).Unix(),
 	})
 	// Force fresh verifier with tiny refresh window so test runs instantaneously without sleeping 2s
 	rotVerifier := oidc.NewVerifier(oidc.VerifierConfig{
 		Issuer:   idpSrv.URL,
-		Audience: "prometheus-mcp-gateway",
+		Audience: "piton-mcp-gateway",
 	})
 	if p, err := rotVerifier.VerifyToken(ctx, rotatedTok); err != nil || p.Subject != "carol@acme.com" {
 		t.Fatalf("expected rotated key rsa-k2 to verify cleanly, got p=%v err=%v", p, err)

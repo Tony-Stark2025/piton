@@ -15,4 +15,4 @@ node_modules/
 .venv/
 env/
 venv/
-prometheus_exam_portal.html
+piton_exam_portal.html

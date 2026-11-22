@@ -1,28 +1,28 @@
 """
-Tests for Prometheus Runtime IFC Taint Tracking (CaMeL/FIDES), Passive Shadow Mode,
+Tests for Piton Runtime IFC Taint Tracking (CaMeL/FIDES), Passive Shadow Mode,
 Static-to-Runtime Virtual Patch Bridge, Deterministic Patch Risk Gate (Codex Security pattern),
 and Loop-Breaking Reflection Tracker (Buttercup pattern).
 """
 
 import pytest
 
-from prometheus.pentest.models import (
+from piton.pentest.models import (
     AutoPatchResult,
     ExploitProof,
     HttpMethod,
     Severity,
     VulnerabilityCategory,
 )
-from prometheus.pentest.patch_risk_gate import (
+from piton.pentest.patch_risk_gate import (
     MergeRecommendation,
     ReflectionDirective,
     RepairReflectionTracker,
     synthesize_virtual_patch_from_proof,
     validate_patch_risk_assessment,
 )
-from prometheus.proxy.hypervisor import ToolExecutionHypervisor
-from prometheus.proxy.models import DenialCode, ProxyToolRequest, ToolCallType
-from prometheus.proxy.token_authority import TokenAuthority
+from piton.proxy.hypervisor import ToolExecutionHypervisor
+from piton.proxy.models import DenialCode, ProxyToolRequest, ToolCallType
+from piton.proxy.token_authority import TokenAuthority
 
 
 @pytest.mark.asyncio

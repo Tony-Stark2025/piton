@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from prometheus.config import Settings
+from piton.config import Settings
 
 
 def test_config_plain_strings():
@@ -24,7 +24,7 @@ def test_config_secret_manager_resolution():
         mock_sm.return_value = mock_client
 
         s = Settings(
-            github_token='sm://prometheus-github-token',
+            github_token='sm://piton-github-token',
             gemini_api_key='secretmanager://projects/my-proj/secrets/gemini-token/versions/2'
         )
         assert s.github_token == 'live-secret-val-456'
@@ -33,5 +33,5 @@ def test_config_secret_manager_resolution():
 
 def test_config_secret_manager_fallback_on_error():
     with patch('google.cloud.secretmanager.SecretManagerServiceClient', side_effect=Exception('SM Down')):
-        s = Settings(github_token='sm://prometheus-github-token')
-        assert s.github_token == 'sm://prometheus-github-token'
+        s = Settings(github_token='sm://piton-github-token')
+        assert s.github_token == 'sm://piton-github-token'

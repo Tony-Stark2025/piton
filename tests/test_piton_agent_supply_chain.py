@@ -9,9 +9,9 @@ Unit & CLI Tests for Piton AI Coding-Agent Supply-Chain Firewall:
 import json
 from pathlib import Path
 
-from prometheus import cli
-from prometheus.iac.agent_config_lint import scan_agent_supply_chain
-from prometheus.iac.poisoning_lint import LintSeverity
+from piton import cli
+from piton.iac.agent_config_lint import scan_agent_supply_chain
+from piton.iac.poisoning_lint import LintSeverity
 
 
 def test_clean_repo_passes_piton_scan(tmp_path: Path):
@@ -140,9 +140,9 @@ def test_piton_lock_diff_blocks_pr_introducing_claude_hook_rce(tmp_path: Path):
             "--repo",
             str(tmp_path),
             "--config",
-            str(tmp_path / "prometheus.yaml"),
+            str(tmp_path / "piton.yaml"),
             "--lockfile",
-            str(tmp_path / "prometheus.lock"),
+            str(tmp_path / "piton.lock"),
             "--manifest",
             str(manifest),
             "--diff",

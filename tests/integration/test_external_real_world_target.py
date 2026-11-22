@@ -1,6 +1,6 @@
 """
 Integration Test: Real-World External Target Autonomous Verification
-Validates Prometheus against a standalone, live multi-tenant microservice
+Validates Piton against a standalone, live multi-tenant microservice
 (OmniChain Global Logistics Cloud API) over real TCP network sockets.
 
 Verifies:
@@ -20,8 +20,8 @@ import sys
 import pytest
 import httpx
 
-from prometheus.cli_scan import run_scan, terminate_process_tree
-from prometheus.pentest.regression_test_generator import RegressionTestGenerator
+from piton.cli_scan import run_scan, terminate_process_tree
+from piton.pentest.regression_test_generator import RegressionTestGenerator
 
 
 @pytest.fixture
@@ -67,7 +67,7 @@ async def test_external_real_world_target_end_to_end_scan(free_tcp_port, tmp_pat
     out_md_file = tmp_path / "report.md"
 
     try:
-        # 2. Run Prometheus scan against live server
+        # 2. Run Piton scan against live server
         exit_code = await run_scan(
             target_url=target_url,
             spec_data=spec_dict,
@@ -130,7 +130,7 @@ async def test_external_target_patched_clean_bill_of_health(free_tcp_port):
     assert ready, "External target server failed to report ready within timeout."
 
     try:
-        # 2. Run Prometheus scan against patched server
+        # 2. Run Piton scan against patched server
         exit_code = await run_scan(
             target_url=target_url,
             spec_data=spec_dict,

@@ -1,5 +1,5 @@
 """
-Unit tests for Prometheus Capability Hypervisor and Stateful Execution Firewall.
+Unit tests for Piton Capability Hypervisor and Stateful Execution Firewall.
 Verifies monotonic capability attenuation, causal dependency gates, pre-state
 witness hashing H(S), action permits, and structured semantic denial envelopes.
 """
@@ -8,23 +8,23 @@ import time
 import pytest
 from unittest.mock import AsyncMock
 
-from prometheus.proxy.models import (
+from piton.proxy.models import (
     DenialCode,
     ProxyToolRequest,
     ToolCallType,
 )
-from prometheus.proxy.token_authority import (
+from piton.proxy.token_authority import (
     AttenuationViolationError,
     TokenAuthority,
 )
-from prometheus.proxy.state_invariants import (
+from piton.proxy.state_invariants import (
     CausalLineageTracker,
     StateInvariantGate,
     StateWitnessRegistry,
 )
-from prometheus.proxy.hypervisor import ToolExecutionHypervisor
-from prometheus.pentest.models import HttpMethod, RouteEndpoint
-from prometheus.pentest.route_graph import OpenAPIRouteGraph
+from piton.proxy.hypervisor import ToolExecutionHypervisor
+from piton.pentest.models import HttpMethod, RouteEndpoint
+from piton.pentest.route_graph import OpenAPIRouteGraph
 
 
 @pytest.fixture

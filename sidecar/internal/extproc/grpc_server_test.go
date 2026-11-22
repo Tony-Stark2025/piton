@@ -22,9 +22,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/extproc"
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/policy"
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/scrub"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/extproc"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/policy"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/scrub"
 )
 
 func floatPtr(v float64) *float64 { return &v }

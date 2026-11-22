@@ -13,8 +13,8 @@ import (
 	ext_procv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	typev3 "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/policy"
-	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/scrub"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/policy"
+	"github.com/Tony-Stark2025/piton/sidecar/internal/scrub"
 )
 
 // Server implements the official Envoy v3 `envoy.service.ext_proc.v3.ExternalProcessor`
@@ -84,7 +84,7 @@ func immediateJSONResponse(payload any) *ext_procv3.ProcessingResponse {
 						},
 						{
 							Header: &corev3.HeaderValue{
-								Key:      "x-prometheus-enforced",
+								Key:      "x-piton-enforced",
 								RawValue: []byte("true"),
 							},
 						},
@@ -173,7 +173,7 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 			body := bytes.TrimSpace(phase.RequestBody.GetBody())
 			// Fail closed on JSON-RPC batch arrays `[...]`
 			if len(body) > 0 && body[0] == '[' {
-				if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(nil, -32600, "JSON-RPC batch requests are not permitted by Prometheus policy", nil))); err != nil {
+				if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(nil, -32600, "JSON-RPC batch requests are not permitted by Piton policy", nil))); err != nil {
 					return err
 				}
 				continue
@@ -202,7 +202,7 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 							idemKey = ik
 						}
 					}
-					mrtrTok := st.headers.Get("X-Prometheus-MRTR-Approval")
+					mrtrTok := st.headers.Get("X-Piton-MRTR-Approval")
 					if mrtrTok == "" {
 						if irs, ok := rpcReq.Params["inputResponses"].([]any); ok && len(irs) > 0 {
 							if first, ok := irs[0].(map[string]any); ok {
@@ -236,7 +236,7 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 					)
 
 					if ev.Verdict == "deny" {
-						if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(rpcReq.ID, -32001, "Prometheus Policy Denial", ev))); err != nil {
+						if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(rpcReq.ID, -32001, "Piton Policy Denial", ev))); err != nil {
 							return err
 						}
 						continue
@@ -268,7 +268,7 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 
 			// Reject unexpected compressed responses that could smuggle secrets or poisoned tools past inspection
 			if st.respEncoding != "" && st.respEncoding != "identity" {
-				if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(st.rpcID, -32001, "Compressed upstream response rejected by Prometheus inspection policy", map[string]any{
+				if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(st.rpcID, -32001, "Compressed upstream response rejected by Piton inspection policy", map[string]any{
 					"content_encoding": st.respEncoding,
 				}))); err != nil {
 					return err
