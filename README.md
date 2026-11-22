@@ -1,191 +1,131 @@
-# 🔥 Prometheus Enterprise: Autonomous API Penetration Testing & Runtime Capability Hypervisor
+# Prometheus — The Agent Control Loop
 
-[![Enterprise Grade](https://img.shields.io/badge/Enterprise-API_Security-blueviolet.svg)]()
-[![Google GenAI SDK](https://img.shields.io/badge/Google_GenAI-Gemini_3.7_Flash-4285F4.svg)](https://ai.google.dev/)
-[![Model Context Protocol](https://img.shields.io/badge/MCP-stdio_%7C_SSE-00C7B7.svg)]()
-[![Security](https://img.shields.io/badge/security-ABAC_%7C_Capability_Hypervisor-critical.svg)]()
-[![CI/CD SLA](https://img.shields.io/badge/CI%2FCD_Gate-%3C85s_SLA-emerald.svg)]()
+**Diff-Governed MCP Manifest Pinning (`prometheus.lock`), Shadow-to-Enforce Policy Calibration (`prometheus replay`), Signed Decision Ledgers & Envoy v3 gRPC `ext_proc` Sidecar.**
 
-> **The Zero False-Positive API Vulnerability Discovery & Autonomous Remediation Engine**  
-> *Transforming OpenAPI specifications into topologically sorted route dependency DAGs, verifying BOLA/BFLA exploitability via cryptographic canary reflection defense, synthesizing certified AST source repairs with CEGIS dual-pass verifiers, and enforcing runtime tool safety via an inline cryptographic Capability Hypervisor.*
+Prometheus gives platform engineering and security teams the missing operational control loop above existing agent gateways (`Envoy`, `agentgateway`, `Stacklok ToolHive`, `AWS AgentCore`, `Docker`):
+
+1. **Zero-Friction Day-1 Onboarding (`prometheus init`)** — Statically scans your repo's MCP configs (`.cursor/mcp.json`, `mcp.json`, `claude_desktop_config.json`), `.env.example`, and `docker-compose.yml` to generate clean human-intent `prometheus.yaml` (`mode: shadow`), machine-managed `prometheus.lock`, and safe `.env.agent` ghost handles—while running a deterministic **Day-1 MCP Description-Poisoning Linter** that quarantines covert prompt injections, credential exfil directives, and invisible Unicode before pinning.
+2. **Split-Hash MCP Manifest Pinning (`prometheus.lock`)** — Separates `structural_sha256` (`name` + canonical `inputSchema`, hard-blocked on drift everywhere) from `description_sha256` (hard-blocked on `third_party` MCPs to stop rug pulls, `warn` on `internal` MCPs so docstring edits never cause outages), plus cross-server tool-shadowing detection and a drop-in GitHub Action PR diff gate ([prometheus-lock-gate.yml](.github/workflows/prometheus-lock-gate.yml)).
+3. **Shadow-to-Enforce Policy Calibration (`prometheus replay` & `prometheus top`)** — Records PII-preserving deterministic tokenized traces (`alice@acme.com` → `tok_8f1a2b3c@acme.com`, keeping domains and numeric ceilings replayable without storing raw PII) into an **HMAC-chained, version-pinned Signed Decision Ledger**, then replays shadow traffic offline to compute exact false-block rates and concrete `parameter_bounds` calibration suggestions before flipping `shadow` → `enforce`.
+4. **Static Go Bidirectional Sidecar (`sidecar/`)** — Sub-millisecond production enforcement speaking:
+   - **Official Envoy v3 Bidirectional gRPC `ext_proc`** (`envoy.service.ext_proc.v3.ExternalProcessor` on HTTP/2 port `50051`) for Envoy Proxy, Envoy AI Gateway / Agent Router, and Istio.
+   - **Cryptographic OIDC JWKS `RS256` / `ES256` Verification** (auto-discovery + TTL cache + key-rotation refresh + RFC 8693 OBO `sub`/`act.sub` extraction, fail-closed).
+   - **Zero-Secret Reverse Proxy (`/gw/{slot}/...`) + Bidirectional MCP Proxy (`/mcp/{server}`)**: format-preserving ghost tokens (`sk_test_promghost_*`), `3xx` redirect refusal, `Accept-Encoding` stripping, and a **sliding-window multi-encoding response secret scrubber** (catching secrets split across streaming/SSE chunk boundaries + base64/URL/JSON-escaped leaks).
 
 ---
 
-## 🏛️ System Architecture
+## Architecture
 
 ```text
-       [ CI/CD Pipeline / GitHub Actions / Developer Terminal / CLI / MCP ]
-                                         │
-                                         ▼
-                 ┌──────────────────────────────────────────────┐
-                 │          API Lineage Graph Engine            │
-                 │   - OpenAPI 3.x Ingestion & Schema Parsing   │
-                 │   - Tarjan SCC Topological Condensation      │
-                 │   - State Synthesizer (Victims / Seed Pairs) │
-                 └───────────────────────┬──────────────────────┘
-                                         │
-                                         ▼
-                 ┌──────────────────────────────────────────────┐
-                 │       Autonomous Exploit Prober Gate         │
-                 │   - Dual-Tenant Persona Probing (BOLA/BFLA)  │
-                 │   - Reflection Defense (Cryptographic Canary)│
-                 │   - SSRF Multi-Tier Rebinding Defense        │
-                 │   - Strict Zero False-Positive Invariant     │
-                 └───────────────────────┬──────────────────────┘
-                                         │
-                                         ▼
-                 ┌──────────────────────────────────────────────┐
-                 │     CEGIS Dual-Pass Program Repair           │
-                 │   - Gemini 3.7 Flash Guided AST Rewriter     │
-                 │   - Pass 1: Neutralize Attacker (403/404)    │
-                 │   - Pass 2: Preserve Victim Workflows (200)  │
-                 │   - Automated Unified Git Patch Generation   │
-                 └───────────────────────┬──────────────────────┘
-                                         │
-                                         ▼
-                 ┌──────────────────────────────────────────────┐
-                 │         Inline Capability Hypervisor         │
-                 │   - Pre-State Witness H(S) Ledger (HMAC)     │
-                 │   - Monotonic Single-Use Action Permits      │
-                 │   - Structured Semantic Denial Envelopes     │
-                 │   - Fail-Closed Policy Enforcement Engine    │
-                 └──────────────────────────────────────────────┘
+  [ Repo + MCP Configs ] ──► prometheus init (+ Day-1 Poisoning Lint)
+                                    │
+                   ┌────────────────┴────────────────┐
+                   ▼                                 ▼
+            prometheus.yaml                   prometheus.lock
+       (Human Intent & Bounds)         (Split structural / description pins)
+                   │                                 │
+                   └────────────────┬────────────────┘
+                                    ▼
+  [ Envoy / agentgateway / Agent ] ◄──► [ Go Sidecar (ext_proc gRPC + /mcp + /gw) ]
+                                           • RS256/ES256 OIDC JWKS + RFC 8693 OBO
+                                           • Parameter Bounds + MCP MRTR (-32002)
+                                           • Live tools/list Rug-Pull Pin (-32001)
+                                           • Sliding-Window Secret Redaction
+                                                    │
+                                                    ▼
+                                     [ Signed Decision Ledger (JSONL) ]
+                                       (HMAC-chained, PII-tokenized)
+                                                    │
+                              ┌─────────────────────┴─────────────────────┐
+                              ▼                                           ▼
+                       prometheus top                             prometheus replay
+                   (Live Flight Recorder)                  (0% False-Block Calibration)
 ```
 
 ---
 
-## ⚡ Core Pillars
+## 60-Second Quickstart Demo
 
-### 1. Zero False-Positive Exploitation (Reflection Defense)
-Traditional DAST tools flood security teams with false alarms based on HTTP status codes. Prometheus enforces a **cryptographic reflection defense**:
-- High-entropy canaries are harvested from legitimate tenant sessions.
-- An exploit is confirmed **only if** the unauthorized actor retrieves the exact private canary belonging to the victim tenant.
-- Eliminates 100% of status-code hallucinations and benign 200 OK reflections.
+Requires **Python 3.10+** and **Go 1.24+**.
 
-### 2. Autonomous Program Repair (CEGIS Dual-Pass AST Verification)
-When a flaw is verified, Prometheus does not just alert; it generates and validates source code fixes:
-- Parses target source code into Abstract Syntax Trees (AST).
-- Synthesizes tenant isolation guards and authorization decorators using Gemini 3.7 Flash.
-- Evaluates candidates against a **Counterexample-Guided Inductive Synthesis (CEGIS)** dual-pass test oracle:
-  - **Pass 1 (Attacker Invariant)**: Unauthorized probe must yield `403 Forbidden` or `404 Not Found`.
-  - **Pass 2 (Victim Invariant)**: Legitimate owner requests must continue to return `200 OK` with valid data.
-- Outputs clean, verified unified diff patches ready for merge.
-
-### 3. Inline Capability Hypervisor & Token Authority
-To protect APIs from autonomous tool and agent abuse at runtime, Prometheus provides an inline gateway:
-- **Capability Tokens**: Cryptographically signed, scoped tokens defining authorized operations.
-- **Pre-State Witnesses $H(S)$**: Hashes and validates target resource state prior to mutation to prevent TOCTOU race conditions.
-- **Single-Use Action Permits**: Monotonic, tamper-evident action permits that prevent replay attacks.
-- **Semantic Denial Envelopes**: Structured recovery payloads returned upon denial, detailing the exact violated invariant and remediation guidance.
-
-### 4. Enterprise ABAC & Security Perimeter
-- Sub-millisecond Attribute-Based Access Control (ABAC) evaluation engine.
-- Persistent audit logging with microsecond-level timing and deterministic clearance verification.
-- SSRF defense blocking RFC 1918 subnets, cloud metadata services (AWS IPv6 `fd00:ec2::254`, GCP, Azure, OCI), and DNS rebinding vectors.
-
----
-
-## 🚀 Quickstart
-
-### Prerequisites
-- Python 3.11+
-- Virtual environment with dependencies installed:
-  ```bash
-  pip install -e .
-  ```
-
-### 1-Command Self-Contained Demo (Zero Setup)
-Run Prometheus against its built-in multi-tenant benchmark service (`BOLA` + `BFLA` + CEGIS compiled AST verification):
 ```bash
-python -m prometheus.cli_scan --demo
+# 1. Install Prometheus CLI (editable)
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+# 2. Run the self-contained 60-second Agent Control Loop demo
+bash examples/quickstart-billing-agent/run_demo.sh
 ```
 
-### Drop-In GitHub Action (`@v3`)
-Add Prometheus as an automated Pull Request Security Gate in `.github/workflows/prometheus.yml`:
-```yaml
-- name: Prometheus Autonomous AppSec Gate
-  uses: Tony-Stark2025/prometheus-enterprise@v3
-  with:
-    mode: "pentest"          # or "immunology"
-    app-cmd: "uvicorn app.main:app --port 8000"
-    target-url: "http://127.0.0.1:8000"
-    fail-on-exploit: "true"
-```
+The demo runs the exact user workflow end-to-end:
+1. `prometheus init` discovers MCP servers + `.env.example`, **quarantines a Day-1 poisoned tool**, and writes `prometheus.yaml`, `prometheus.lock`, and `.env.agent`.
+2. `prometheus run -- python billing_agent.py` compiles policy, boots the Go sidecar with the real host `STRIPE_API_KEY`, **strips the real key from the agent process**, verifies the `/gw/stripe_api` egress swap + response leak scrubbing, and executes autonomous MCP calls.
+3. `prometheus top` displays the PII-tokenized flight recorder.
+4. `prometheus ledger-verify` cryptographically verifies the Go-written HMAC chain in Python.
+5. `prometheus replay --simulate-enforce` calculates exact block rates and outputs concrete `parameter_bounds` calibrations before promoting to `enforce`.
 
-### Run CI/CD Vulnerability Scan & Publish Remediation PR
-Execute an autonomous vulnerability assessment against a live OpenAPI endpoint (or pass `--app-cmd` to boot it automatically) and open a compiler-verified GitHub Pull Request:
+---
+
+## CLI Reference
+
 ```bash
-python -m prometheus.cli_scan \
-  --target-url http://localhost:8000 \
-  --spec-url /openapi.json \
-  --target-dir . \
-  --publish-pr owner/repo \
-  --sla-budget-s 85.0 \
-  --output-sarif prometheus-report.sarif
-```
+# Generate prometheus.yaml (shadow), prometheus.lock, and .env.agent
+prometheus init --repo . [--manifest observed_tools.json]
 
-### Run Event-Driven Continuous Immunology & Coding-Agent Supply-Chain Sweep
-Ingest live advisories from The Hacker News (THN) RSS and OSV.dev, parse repository lockfiles (`requirements.txt`, `pyproject.toml`, `poetry.lock`, `package.json`, `package-lock.json`), trace AST call-graph reachability to exposed routes, and detect *GitSpawn* / *Plugin4Shell* / *Package-Firewall* threats:
-```bash
-python -m prometheus.cli_scan --immunology --target-dir . --publish-pr owner/repo
-```
+# Run any local agent with zero live secrets in its process environment
+prometheus run --config prometheus.yaml -- python my_agent.py
 
-### Run the Prometheus Security Engine Service
-```bash
-uvicorn prometheus.main:app --host 0.0.0.0 --port 8000 --reload
-```
-Access the interactive dashboard at `http://localhost:8000/dashboard` and OpenAPI documentation at `http://localhost:8000/docs`.
+# Live / recent flight recorder view
+prometheus top --traces .prometheus/traces.jsonl [--follow]
 
-### Run Test Suite
-```bash
-pytest tests/test_prometheus_v25_architecture.py tests/test_commercial_saas_and_agentic_owasp.py -v
+# Verify HMAC chain integrity of the version-pinned compliance ledger
+prometheus ledger-verify --traces .prometheus/traces.jsonl
+
+# Simulate `enforce` mode over recorded shadow traffic to calibrate bounds
+prometheus replay --config prometheus.yaml --traces .prometheus/traces.jsonl --simulate-enforce
+
+# CI Pull Request gate: diff observed MCP tools/list against prometheus.lock
+prometheus lock --config prometheus.yaml --lockfile prometheus.lock --manifest observed_tools.json --diff
+
+# Refresh approved internal MCP hashes after review
+prometheus lock --config prometheus.yaml --lockfile prometheus.lock --manifest observed_tools.json --update
+
+# Compile prometheus.yaml to .prometheus/runtime_policy.json for the Go sidecar
+prometheus compile --config prometheus.yaml --out .prometheus/runtime_policy.json
 ```
 
 ---
 
-## 🧬 Prometheus v2.5 Architecture Upgrades
+## Production Envoy / Kubernetes Deployment
 
-1. **Multi-Turn Glass-Box ReAct Loop & Safe-Exploit Egress Proxy**:
-   - Combines runtime HTTP probing with `_inspect_route_source_tool` (Glass-Box route handler source inspection) and `_reflect_and_mutate_on_observation` under tiered model routing (`recon`, `explore`, `swe_repair`).
-   - Enforces token-bucket rate limiting, third-party SaaS side-effect interception (Stripe, Twilio, SendGrid, Slack), catastrophic REST bulk-delete blocking, and indirect prompt injection sanitization via `SafeExploitEgressProxy`.
-2. **Multi-Tiered Evidence Oracle & Ephemeral Out-of-Band (OOB) Canary Listener**:
-   - **Tier 1 (Deterministic Protocol Proof)**: Cross-tenant canary reflection + ephemeral OOB callback listeners (`POST /api/v1/oob/mint`, `GET/POST /api/v1/oob/{canary_id}`) for Blind SSRF, XXE, and webhook injection.
-   - **Tier 2 (Empirical State Divergence)**: Synchronized concurrent `asyncio.gather` burst probes (`probe_race_condition`) for TOCTOU / double-spend vulnerabilities.
-   - **Tier 3 (Semantic Business Logic Violations)**: Role escalation and workflow bypass verification.
-3. **Contextual Agentic SWE Repair & Self-Healing Compiler Loop**:
-   - Synthesizes single and multi-file patches (`ContextualSWERepairAgent`), verifies syntax via native subprocess compilation (`py_compile` + `ast.parse` for Python; `node --check --experimental-strip-types` for TypeScript), self-heals on compiler `stderr`, and opens real GitHub Pull Requests via `PRReporter.publish_github_pull_request` (`POST /api/v1/pentest/publish-pr`).
-4. **Event-Driven Continuous Immunology**:
-   - Connects live threat feeds (THN RSS + OSV.dev batch API) to repository lockfiles, traces AST/method-level call-graph reachability (`trace_call_graph_reachability`), suppresses unreachable dependency noise, and synthesizes syntax-verified manifest upgrades (`POST /api/v1/immunology/scan`).
+Build the standalone static Go sidecar binary:
 
----
+```bash
+cd sidecar
+CGO_ENABLED=0 go build -o bin/prometheus-sidecar ./cmd/prometheus-sidecar
+./bin/prometheus-sidecar \
+  --policy .prometheus/runtime_policy.json \
+  --lock prometheus.lock \
+  --traces /var/log/prometheus/traces.jsonl \
+  --addr 127.0.0.1:8080 \
+  --grpc-addr 127.0.0.1:50051
+```
 
-## 🛡️ Model Context Protocol (MCP) Super-Agent Suite (10 Tools)
-
-Prometheus exposes its offensive verification, continuous immunology, SWE repair, and hypervisor capabilities over stdio and Server-Sent Events (`/mcp/sse`):
-- `scan_api_security`: Trigger autonomous API discovery and dual-tenant penetration testing.
-- `prometheus_immunology_check`: Run live THN + OSV.dev advisory ingestion and AST call-graph reachability analysis.
-- `prometheus_verify_exposure`: Trace whether a specific package or symbol is reachable in the repository call-graph.
-- `prometheus_generate_poc`: Generate standalone, token-redacted Python `httpx` reproduction scripts and `curl` commands.
-- `prometheus_synthesize_patch`: Synthesize compiler-verified `ContextualPatchPR` code patches and CI/CD regression tests.
-- `prometheus_publish_pr`: Create a GitHub remediation branch, commit patched files, and open a Pull Request.
-- `mint_capability_token`: Mint cryptographically bound capability tokens for agent operations.
-- `request_action_permit`: Request single-use monotonic permits for state-mutating API actions.
-- `verify_action_permit`: Validate an action permit against pre-state witness $H(S)$ prior to mutation.
-- `inspect_agentic_payload`: Evaluate tool calls and RAG context against the **2026 OWASP Agentic Top 10 (`ASI01`–`ASI10`)** and CoSAI DLP guardrails.
+Wire Envoy's `envoy.filters.http.ext_proc` filter to `127.0.0.1:50051` using the included reference config [sidecar/deploy/envoy-ext-proc.yaml](sidecar/deploy/envoy-ext-proc.yaml).
 
 ---
 
-## 🏢 Commercial SaaS, Multi-Tenant API Keys & Compliance Exports
+## Running All Tests
 
-Built for **Hybrid PLG + Enterprise Sales** (`Starter` \$0/mo, `Pro` \$499/mo, `Enterprise Guard` \$7,500/mo):
-- **Multi-Tenant Scoped API Keys (`/api/v1/saas/api-keys`)**: Mint `prom_live_...` keys hashed with SHA-256 at rest, supporting `X-API-Key` and `Bearer` authentication with per-tenant sliding-window rate limits.
-- **OWASP Agentic Top 10 Shield (`/api/v1/security/agentic/*`)**: Real-time deterministic blocking of Agent Goal Hijack (`ASI01`), Tool Misuse (`ASI02`), Non-Human Identity Abuse (`ASI03`), Supply Chain Schema Poisoning (`ASI04`), Sandbox Escape (`ASI05`), Memory Poisoning (`ASI06`), Unsafe Delegation (`ASI07`), Hallucinated IDs (`ASI08`), Human Trust Exploitation (`ASI09`), and Autonomous Exfiltration (`ASI10`).
-- **Signed Compliance Ledgers (`/api/v1/saas/compliance/export`)**: Generates cryptographically verifiable **EU AI Act Art. 12/15**, **SOC 2 Type II**, and **CoSAI** audit bundles anchored by a SHA-256 Merkle state root and HMAC-SHA256 signature.
+```bash
+# Go sidecar unit + race + Envoy v3 gRPC ext_proc + OIDC RS256/ES256 JWKS tests
+(cd sidecar && go test -race -v ./...)
 
----
-
-## 🔒 Security & Compliance
-- **Zero-Mock Policy**: All scan routines, cryptographic verifications, and proxy gates execute real protocols and verifiable payloads.
-- **SSRF Defense-in-Depth**: Strict IP validation with loopback-only override support for local test suites.
-- **Fail-Closed Runtime**: Missing tokens, expired permits, or altered pre-state witnesses result in deterministic denial.
-
+# Python control loop + cross-language Go<->Python integration + security test suites
+pytest tests/test_sidecar_integration.py \
+       tests/test_agent_control_loop_v3.py \
+       tests/test_ifc_and_patch_risk_gate.py \
+       tests/test_security_hardening_fixes.py \
+       tests/test_commercial_saas_and_agentic_owasp.py \
+       tests/test_prometheus_v25_architecture.py -v
+```

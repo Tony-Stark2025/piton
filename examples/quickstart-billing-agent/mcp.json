@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "billing-internal": {
+      "url": "http://127.0.0.1:19001/mcp/billing"
+    },
+    "zendesk-vendor": {
+      "url": "http://127.0.0.1:19001/mcp/zendesk"
+    }
+  }
+}
