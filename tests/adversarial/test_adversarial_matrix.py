@@ -187,7 +187,7 @@ class TestAdversarialMatrix:
         assert "error" in res1
         assert res1["error"]["code"] == -32601
 
-        # 2. Unknown tool name in tools/call returns -32603
+        # 2. Unknown tool name in tools/call fails closed (-32003 capability denial or -32603)
         res2 = await mcp_server.handle_jsonrpc({
             "jsonrpc": "2.0",
             "id": 999,
@@ -195,9 +195,9 @@ class TestAdversarialMatrix:
             "params": {"name": "nonexistent_tool_overflow", "arguments": {}},
         })
         assert "error" in res2
-        assert res2["error"]["code"] == -32603
+        assert res2["error"]["code"] in (-32003, -32603)
 
-        # 3. Missing arguments in tools/call for scan_api_security returns -32603
+        # 3. Missing arguments / token in tools/call for scan_api_security fails closed
         res3 = await mcp_server.handle_jsonrpc({
             "jsonrpc": "2.0",
             "id": 1000,
@@ -205,4 +205,4 @@ class TestAdversarialMatrix:
             "params": {"name": "scan_api_security", "arguments": {}},
         })
         assert "error" in res3
-        assert res3["error"]["code"] == -32603
+        assert res3["error"]["code"] in (-32003, -32603)

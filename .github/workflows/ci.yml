@@ -7,10 +7,28 @@ on:
     branches: [ main ]
 
 jobs:
-  test-and-validate:
+  go-sidecar-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: sidecar/go.sum
+
+      - name: Run Go Sidecar Race Tests & Static Build
+        working-directory: sidecar
+        run: |
+          go test -race -v ./...
+          CGO_ENABLED=0 go build -trimpath -o bin/prometheus-sidecar ./cmd/prometheus-sidecar
+
+  python-control-loop-and-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -25,22 +43,30 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
 
+      - name: Set up Go (for cross-language sidecar integration test)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: sidecar/go.sum
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install --no-deps -e .
 
-      - name: Run Hermetic Unit & Integration Tests
+      - name: Run Agent Control Loop, Cross-Language Sidecar & Unit Suites
         env:
           ENVIRONMENT: testing
           LOG_LEVEL: DEBUG
           USE_VERTEX_AI: "false"
           GEMINI_API_KEY: ""
         run: |
+          timeout 300 pytest tests/test_sprint_abc_hardening_and_probe.py tests/test_agent_control_loop_v3.py tests/test_sidecar_integration.py tests/test_ifc_and_patch_risk_gate.py tests/test_security_hardening_fixes.py -v --tb=short
           timeout 300 pytest tests/unit/ -v --tb=short --durations=10
           timeout 300 pytest tests/integration/ -v --tb=short --durations=10
           timeout 300 pytest tests/test_prometheus_v25_architecture.py tests/test_commercial_saas_and_agentic_owasp.py tests/adversarial/ tests/test_endpoints.py -v --tb=short --durations=10
 
-      - name: Verify Docker Container Build
+      - name: Verify 60-Second End-to-End Quickstart Demo
         run: |
-          docker build -t prometheus-test:latest .
+          bash examples/quickstart-billing-agent/run_demo.sh

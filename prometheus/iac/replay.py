@@ -99,15 +99,42 @@ class PolicyEvaluationResult(BaseModel):
 
 
 def _extract_domain(value: str) -> Optional[str]:
+    """
+    Safe domain extraction preventing URL parser differentials such as
+    `https://evil.com/?x=@acme.com` (never checks `@` before `://`!).
+    """
+    from urllib.parse import urlparse
+
     v = value.strip().lower()
-    if "@" in v:
-        return v.rsplit("@", 1)[1]
+    if not v or any(ch.isspace() for ch in v):
+        return None
     if "://" in v:
-        host = v.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
-        return host or None
-    if "." in v and " " not in v:
+        parsed = urlparse(v)
+        # Reject URL userinfo (`@`) smuggling outright
+        if parsed.username is not None or parsed.password is not None:
+            return None
+        return parsed.hostname.lower() if parsed.hostname else None
+    m = EMAIL_RE.match(v)
+    if m:
+        return m.group(2).lower()
+    if "." in v and "@" not in v and "/" not in v:
         return v
     return None
+
+
+def _strict_enum_member(val: Any, allowed: List[Any]) -> bool:
+    for item in allowed:
+        if type(val) is bool or type(item) is bool:
+            if type(val) is type(item) and val == item:
+                return True
+            continue
+        if isinstance(val, (int, float)) and isinstance(item, (int, float)):
+            if float(val) == float(item):
+                return True
+            continue
+        if type(val) is type(item) and val == item:
+            return True
+    return False
 
 
 def _check_parameter_bound(param_name: str, value: Any, bound: ParameterBound, on_exceed: BoundExceededAction) -> List[RuleViolation]:
@@ -149,7 +176,7 @@ def _check_parameter_bound(param_name: str, value: Any, bound: ParameterBound, o
                     )
                 )
 
-    if bound.enum is not None and value not in bound.enum:
+    if bound.enum is not None and not _strict_enum_member(value, bound.enum):
         violations.append(
             RuleViolation(
                 rule_id="PARAM_ENUM_VIOLATION",
@@ -161,55 +188,72 @@ def _check_parameter_bound(param_name: str, value: Any, bound: ParameterBound, o
             )
         )
 
-    if isinstance(value, str):
-        if bound.max_length is not None and len(value) > bound.max_length:
+    has_string_bounds = (
+        bound.max_length is not None
+        or bound.regex is not None
+        or bound.allow_domains is not None
+        or bound.deny_domains is not None
+    )
+    if has_string_bounds:
+        if not isinstance(value, str):
             violations.append(
                 RuleViolation(
-                    rule_id="PARAM_MAX_LENGTH_EXCEEDED",
+                    rule_id="PARAM_TYPE_MISMATCH",
                     parameter=param_name,
-                    message=f"Parameter '{param_name}' length {len(value)} exceeds max_length {bound.max_length}.",
-                    observed_value=len(value),
-                    configured_bound=bound.max_length,
-                    recommended_action=on_exceed,
-                )
-            )
-        if bound.regex is not None and not re.search(bound.regex, value):
-            violations.append(
-                RuleViolation(
-                    rule_id="PARAM_REGEX_MISMATCH",
-                    parameter=param_name,
-                    message=f"Parameter '{param_name}' failed regex bound '{bound.regex}'.",
+                    message=f"Parameter '{param_name}' expected string value for domain/regex/length bound.",
                     observed_value=value,
-                    configured_bound=bound.regex,
                     recommended_action=on_exceed,
                 )
             )
-        if bound.allow_domains is not None or bound.deny_domains is not None:
-            dom = _extract_domain(value)
-            if bound.deny_domains and dom and dom in [d.lower() for d in bound.deny_domains]:
+        else:
+            if bound.max_length is not None and len(value) > bound.max_length:
                 violations.append(
                     RuleViolation(
-                        rule_id="PARAM_DOMAIN_DENIED",
+                        rule_id="PARAM_MAX_LENGTH_EXCEEDED",
                         parameter=param_name,
-                        message=f"Domain '{dom}' on parameter '{param_name}' is explicitly denied.",
-                        observed_value=dom,
-                        configured_bound=bound.deny_domains,
+                        message=f"Parameter '{param_name}' length {len(value)} exceeds max_length {bound.max_length}.",
+                        observed_value=len(value),
+                        configured_bound=bound.max_length,
                         recommended_action=on_exceed,
                     )
                 )
-            if bound.allow_domains is not None:
-                allowed = [d.lower() for d in bound.allow_domains]
-                if not dom or dom not in allowed:
+            if bound.regex is not None and not re.search(bound.regex, value):
+                violations.append(
+                    RuleViolation(
+                        rule_id="PARAM_REGEX_MISMATCH",
+                        parameter=param_name,
+                        message=f"Parameter '{param_name}' failed regex bound '{bound.regex}'.",
+                        observed_value=value,
+                        configured_bound=bound.regex,
+                        recommended_action=on_exceed,
+                    )
+                )
+            if bound.allow_domains is not None or bound.deny_domains is not None:
+                dom = _extract_domain(value)
+                if bound.deny_domains and dom and dom in [d.lower() for d in bound.deny_domains]:
                     violations.append(
                         RuleViolation(
-                            rule_id="PARAM_DOMAIN_NOT_ALLOWED",
+                            rule_id="PARAM_DOMAIN_DENIED",
                             parameter=param_name,
-                            message=f"Domain '{dom}' on parameter '{param_name}' is not in allow_domains {bound.allow_domains}.",
+                            message=f"Domain '{dom}' on parameter '{param_name}' is explicitly denied.",
                             observed_value=dom,
-                            configured_bound=bound.allow_domains,
+                            configured_bound=bound.deny_domains,
                             recommended_action=on_exceed,
                         )
                     )
+                if bound.allow_domains is not None:
+                    allowed = [d.lower() for d in bound.allow_domains]
+                    if not dom or dom not in allowed:
+                        violations.append(
+                            RuleViolation(
+                                rule_id="PARAM_DOMAIN_NOT_ALLOWED",
+                                parameter=param_name,
+                                message=f"Domain '{dom}' on parameter '{param_name}' is not in allow_domains {bound.allow_domains}.",
+                                observed_value=dom,
+                                configured_bound=bound.allow_domains,
+                                recommended_action=on_exceed,
+                            )
+                        )
 
     return violations
 
@@ -223,11 +267,13 @@ def evaluate_tool_call_against_policy(
     obo_principal: Optional[str] = None,
     idempotency_key: Optional[str] = None,
     trace_tool_call_count: int = 1,
+    principal_hourly_calls: int = 1,
+    principal_hourly_sum: float = 0.0,
     simulate_enforce: bool = False,
 ) -> PolicyEvaluationResult:
     """
     Deterministically evaluates a single MCP tool call against `prometheus.yaml`
-    parameter bounds, rate limits, idempotency requirements, and OIDC/OBO identity rules.
+    parameter bounds, rate limits, cumulative principal ceilings, idempotency, and OIDC/OBO rules.
     """
     violations: List[RuleViolation] = []
 
@@ -243,7 +289,25 @@ def evaluate_tool_call_against_policy(
             )
 
     srv_policy = config.mcp_servers.get(server_name)
-    tool_policy: Optional[ToolPolicy] = srv_policy.tools.get(tool_name) if srv_policy else None
+    if srv_policy is None:
+        violations.append(
+            RuleViolation(
+                rule_id="UNKNOWN_MCP_SERVER",
+                message=f"MCP server '{server_name}' is not declared in prometheus.yaml.",
+                recommended_action=BoundExceededAction.BLOCK,
+            )
+        )
+        tool_policy = None
+    else:
+        tool_policy = srv_policy.tools.get(tool_name)
+        if tool_policy is None and srv_policy.strict_unknown_tools:
+            violations.append(
+                RuleViolation(
+                    rule_id="UNLISTED_MCP_TOOL",
+                    message=f"Tool '{server_name}.{tool_name}' is not declared in prometheus.yaml.",
+                    recommended_action=BoundExceededAction.BLOCK,
+                )
+            )
 
     if tool_policy is not None:
         # 2. Idempotency requirement on bounded writes
@@ -256,33 +320,73 @@ def evaluate_tool_call_against_policy(
                 )
             )
 
-        # 3. Per-trace call quota
-        if tool_policy.rate_limit and tool_policy.rate_limit.max_calls_per_trace is not None:
-            if trace_tool_call_count > tool_policy.rate_limit.max_calls_per_trace:
-                violations.append(
-                    RuleViolation(
-                        rule_id="TRACE_RATE_LIMIT_EXCEEDED",
-                        message=(
-                            f"Call #{trace_tool_call_count} to '{server_name}.{tool_name}' exceeds "
-                            f"max_calls_per_trace={tool_policy.rate_limit.max_calls_per_trace}."
-                        ),
-                        observed_value=trace_tool_call_count,
-                        configured_bound=tool_policy.rate_limit.max_calls_per_trace,
-                        recommended_action=tool_policy.on_bound_exceeded,
+        # 3. Per-trace & per-principal rolling-hour quotas
+        if tool_policy.rate_limit:
+            if tool_policy.rate_limit.max_calls_per_trace is not None:
+                if trace_tool_call_count > tool_policy.rate_limit.max_calls_per_trace:
+                    violations.append(
+                        RuleViolation(
+                            rule_id="TRACE_RATE_LIMIT_EXCEEDED",
+                            message=(
+                                f"Call #{trace_tool_call_count} to '{server_name}.{tool_name}' exceeds "
+                                f"max_calls_per_trace={tool_policy.rate_limit.max_calls_per_trace}."
+                            ),
+                            observed_value=trace_tool_call_count,
+                            configured_bound=tool_policy.rate_limit.max_calls_per_trace,
+                            recommended_action=tool_policy.on_bound_exceeded,
+                        )
                     )
-                )
+            if tool_policy.rate_limit.max_calls_per_hour is not None:
+                if principal_hourly_calls > tool_policy.rate_limit.max_calls_per_hour:
+                    violations.append(
+                        RuleViolation(
+                            rule_id="PRINCIPAL_HOURLY_CALLS_EXCEEDED",
+                            message=(
+                                f"Hourly call #{principal_hourly_calls} exceeds "
+                                f"max_calls_per_hour={tool_policy.rate_limit.max_calls_per_hour}."
+                            ),
+                            observed_value=principal_hourly_calls,
+                            configured_bound=tool_policy.rate_limit.max_calls_per_hour,
+                            recommended_action=tool_policy.on_bound_exceeded,
+                        )
+                    )
+            if tool_policy.rate_limit.max_sum_per_hour is not None:
+                if principal_hourly_sum > tool_policy.rate_limit.max_sum_per_hour:
+                    violations.append(
+                        RuleViolation(
+                            rule_id="PRINCIPAL_HOURLY_SUM_EXCEEDED",
+                            parameter=tool_policy.rate_limit.sum_parameter,
+                            message=(
+                                f"Cumulative hourly {tool_policy.rate_limit.sum_parameter}={principal_hourly_sum:.2f} "
+                                f"exceeds max_sum_per_hour={tool_policy.rate_limit.max_sum_per_hour}."
+                            ),
+                            observed_value=principal_hourly_sum,
+                            configured_bound=tool_policy.rate_limit.max_sum_per_hour,
+                            recommended_action=tool_policy.on_bound_exceeded,
+                        )
+                    )
 
-        # 4. Parameter bounds
+        # 4. Parameter bounds (fail closed when required bounded parameter is omitted)
         for param_name, bound in tool_policy.parameter_bounds.items():
-            if param_name in arguments:
-                violations.extend(
-                    _check_parameter_bound(
-                        param_name,
-                        arguments[param_name],
-                        bound,
-                        tool_policy.on_bound_exceeded,
+            if param_name not in arguments:
+                if bound.required:
+                    violations.append(
+                        RuleViolation(
+                            rule_id="MISSING_BOUNDED_PARAMETER",
+                            parameter=param_name,
+                            message=f"Required bounded parameter '{param_name}' was omitted.",
+                            recommended_action=BoundExceededAction.BLOCK,
+                        )
                     )
+                continue
+            violations.extend(
+                _check_parameter_bound(
+                    param_name,
+                    arguments[param_name],
+                    bound,
+                    tool_policy.on_bound_exceeded,
                 )
+            )
 
     effective_mode = EnforcementMode.ENFORCE if simulate_enforce else config.agent.mode
     if not violations:
@@ -351,7 +455,9 @@ class SignedDecisionLedger:
                 self._last_hmac = existing[-1].record_hmac
 
     def _compute_record_hmac(self, record: DecisionLedgerRecord) -> str:
-        body = record.model_dump(mode="json", exclude={"record_hmac"})
+        from prometheus.iac.schema import normalize_json_numbers
+
+        body = normalize_json_numbers(record.model_dump(mode="json", exclude={"record_hmac"}))
         canonical = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hmac.new(self._signing_key, canonical, hashlib.sha256).hexdigest()
 
@@ -578,3 +684,153 @@ def replay_traces(
         suggestions=suggestions,
         ready_to_enforce=(total > 0 and blocked_or_esc == 0),
     )
+
+
+# =============================================================================
+# Standard OpenTelemetry / Gateway Access-Log Ingestion & CEL/Cedar Exporters
+# =============================================================================
+
+def load_otel_or_ledger_records(
+    path: Path,
+    tokenizer: Optional[DeterministicTokenizer] = None,
+) -> List[DecisionLedgerRecord]:
+    """
+    Loads either native Prometheus `DecisionLedgerRecord` JSONL OR standard OpenTelemetry
+    MCP span / gateway JSONL exports (recognizing `mcp.server`, `mcp.tool`, `mcp.arguments`,
+    `trace_id`/`traceparent`, `enduser.id`/`obo.principal`), applying PII tokenization on ingest.
+    """
+    tok = tokenizer or DeterministicTokenizer()
+    records: List[DecisionLedgerRecord] = []
+    if not path.is_file():
+        return records
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        raw = json.loads(line)
+        if "record_hmac" in raw and "tokenized_arguments" in raw:
+            records.append(DecisionLedgerRecord.model_validate(raw))
+            continue
+
+        # Standard OpenTelemetry / Envoy / agentgateway span JSON shape
+        attrs = raw.get("attributes") if isinstance(raw.get("attributes"), dict) else raw
+        server_name = str(attrs.get("mcp.server") or attrs.get("server_name") or "default")
+        tool_name = str(attrs.get("mcp.tool") or attrs.get("mcp.method.name") or attrs.get("tool_name") or "unknown")
+        raw_args = attrs.get("mcp.arguments") or attrs.get("arguments") or {}
+        if isinstance(raw_args, str):
+            try:
+                raw_args = json.loads(raw_args)
+            except Exception:
+                raw_args = {}
+        if not isinstance(raw_args, dict):
+            raw_args = {}
+        obo = attrs.get("obo.principal") or attrs.get("enduser.id") or attrs.get("user.id")
+        tp = str(raw.get("traceparent") or raw.get("trace_id") or attrs.get("traceparent") or "00-otel-import-01")
+        idem = attrs.get("mcp.idempotency_key") or attrs.get("idempotency_key")
+
+        tok_args = tok.tokenize_arguments(raw_args)
+        in_sha = hashlib.sha256(json.dumps(raw_args, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        records.append(
+            DecisionLedgerRecord(
+                agent_id=str(attrs.get("service.name") or "otel-imported-agent"),
+                traceparent=tp,
+                obo_principal=str(obo) if obo else None,
+                server_name=server_name,
+                tool_name=tool_name,
+                tokenized_arguments=tok_args,
+                idempotency_key=str(idem) if idem else None,
+                input_sha256=in_sha,
+                policy_sha256="OTEL_IMPORT",
+                lockfile_sha256="OTEL_IMPORT",
+                verdict=DecisionVerdict.ALLOW,
+            )
+        )
+    return records
+
+
+def export_cel_policies(config: AgentIaCConfig) -> str:
+    """
+    Compiles calibrated `prometheus.yaml` parameter bounds into ready-to-apply CEL
+    authorization expressions for Solo.io / AAIF `agentgateway` and Envoy CEL filters.
+    """
+    lines = [
+        f"# Auto-generated by Prometheus Replay/Compiler for agent '{config.agent.id}'",
+        "# Compatible with AAIF agentgateway & Envoy CEL authorization policies",
+        "policies:",
+    ]
+    for srv_name, srv in sorted(config.mcp_servers.items()):
+        for tool_name, tpol in sorted(srv.tools.items()):
+            preds: List[str] = [
+                f'mcp.server == "{srv_name}"',
+                f'mcp.tool.name == "{tool_name}"',
+            ]
+            if config.identity.mode == IdentityMode.OIDC_OBO and config.identity.require_delegated_sub:
+                preds.append('has(jwt.sub) && jwt.sub != ""')
+            if tpol.idempotency_key == "required":
+                preds.append('has(request.headers["idempotency-key"]) && request.headers["idempotency-key"] != ""')
+            for pname, b in sorted(tpol.parameter_bounds.items()):
+                if b.required:
+                    preds.append(f'"{pname}" in mcp.tool.arguments')
+                if b.min is not None:
+                    preds.append(f'double(mcp.tool.arguments["{pname}"]) >= {b.min}')
+                if b.max is not None:
+                    preds.append(f'double(mcp.tool.arguments["{pname}"]) <= {b.max}')
+                if b.enum:
+                    enum_lit = json.dumps(b.enum)
+                    preds.append(f'mcp.tool.arguments["{pname}"] in {enum_lit}')
+                if b.allow_domains:
+                    dom_expr = " || ".join(
+                        f'string(mcp.tool.arguments["{pname}"]).endsWith("@{d.lower()}")'
+                        for d in b.allow_domains
+                    )
+                    preds.append(f"({dom_expr})")
+            lines.append(f"  - name: allow_{srv_name}_{tool_name}".replace("-", "_"))
+            lines.append(f"    match: '{' && '.join(preds)}'")
+    return "\n".join(lines) + "\n"
+
+
+def export_cedar_policies(config: AgentIaCConfig) -> str:
+    """
+    Compiles calibrated `prometheus.yaml` parameter bounds into ready-to-apply Cedar
+    policies for Stacklok ToolHive and AWS Bedrock AgentCore Policy.
+    """
+    blocks = [
+        f"// Auto-generated by Prometheus Replay/Compiler for agent '{config.agent.id}'",
+        "// Compatible with Stacklok ToolHive & AWS Bedrock AgentCore Policy (Cedar)",
+        "",
+    ]
+    for srv_name, srv in sorted(config.mcp_servers.items()):
+        for tool_name, tpol in sorted(srv.tools.items()):
+            conds: List[str] = []
+            if tpol.idempotency_key == "required":
+                conds.append("context has idempotency_key")
+            for pname, b in sorted(tpol.parameter_bounds.items()):
+                if b.required:
+                    conds.append(f"context.arguments has {pname}")
+                if b.min is not None:
+                    conds.append(f"context.arguments.{pname} >= {int(round(b.min * 100))}")
+                if b.max is not None:
+                    conds.append(f"context.arguments.{pname} <= {int(round(b.max * 100))}")
+                if b.enum:
+                    enum_expr = " || ".join(f'context.arguments.{pname} == {json.dumps(v)}' for v in b.enum)
+                    conds.append(f"({enum_expr})")
+                if b.allow_domains:
+                    dom_expr = " || ".join(
+                        f'context.arguments.{pname} like "*@{d.lower()}"' for d in b.allow_domains
+                    )
+                    conds.append(f"({dom_expr})")
+            blocks.append(f'permit (')
+            blocks.append(f'  principal is Agent::Principal,')
+            blocks.append(f'  action == MCP::Action::"{srv_name}:{tool_name}",')
+            blocks.append(f'  resource')
+            blocks.append(f')')
+            if conds:
+                blocks.append("when {")
+                blocks.append("  " + " &&\n  ".join(conds))
+                blocks.append("};")
+            else:
+                blocks[-1] += ";"
+            blocks.append("")
+    return "\n".join(blocks)
+

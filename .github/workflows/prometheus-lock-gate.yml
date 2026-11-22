@@ -8,7 +8,7 @@ on:
       - ".cursor/mcp.json"
       - ".mcp.json"
       - "mcp.json"
-      - "**/mcp_manifest*.json"
+      - "**/observed_mcp_manifest*.json"
 
 jobs:
   mcp-lock-diff:
@@ -19,12 +19,14 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Prometheus CLI
-        run: pip install -e .
-      - name: Verify MCP Manifest Lockfile (Split Structural / Description Pin)
-        if: hashFiles('observed_mcp_manifest.json') != ''
+        run: pip install --no-deps -e . && pip install pyyaml pydantic
+      - name: Verify MCP Manifest Lockfile (Split Structural / Description Pin + Poisoning Lint)
         run: |
-          prometheus lock \
-            --config prometheus.yaml \
-            --lockfile prometheus.lock \
-            --manifest observed_mcp_manifest.json \
-            --diff
+          if [ -f observed_mcp_manifest.json ]; then
+            prometheus lock --config prometheus.yaml --lockfile prometheus.lock --manifest observed_mcp_manifest.json --diff
+          elif [ -f prometheus.yaml ] && [ -f prometheus.lock ]; then
+            prometheus lock --config prometheus.yaml --lockfile prometheus.lock --probe --diff
+          else
+            echo "::error::prometheus.yaml or prometheus.lock missing; run 'prometheus init --probe' and commit the lockfile."
+            exit 1
+          fi

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,22 +16,21 @@ import (
 	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/scrub"
 )
 
-// Server implements the Prometheus bidirectional inline sidecar:
-//  1. `/mcp/{server}` — Bidirectional MCP Streamable HTTP proxy (request bounds + live tools/list pinning)
-//  2. `/gw/{slot}/{path...}` — Zero-secret reverse proxy (ghost token swap, host/method/path check,
-//     no-redirect guard, Accept-Encoding strip, sliding-window response secret scrubbing)
-//  3. `/ext_proc` & `/ext_mcp` — Bidirectional Envoy ext_proc / agentgateway ExtMcp adapter
-//  4. `/healthz` — Health & policy hash introspection
+const maxBodyBytes = 10 << 20 // 10 MiB safety limit against memory exhaustion
+
+// Server implements the Prometheus HTTP sidecar endpoints:
+//  1. `/mcp/{server}` — Bidirectional MCP proxy (JSON + SSE tools/list pinning, MRTR, bounds)
+//  2. `/gw/{slot}/{path...}` — Zero-secret reverse proxy (constant-time ghost check, strict `/` prefix,
+//     no-redirect, compressed-response rejection, sliding-window scrubbing of ALL active secrets)
+//  3. `/healthz` & `/metrics` — K8s health & Prometheus metrics exposition
 type Server struct {
 	Engine      *policy.Engine
 	HTTPClient  *http.Client
-	GhostTokens map[string]string // slot -> expected ghost token (optional verification)
+	GhostTokens map[string]string
 	Mux         *http.ServeMux
 }
 
 func NewServer(engine *policy.Engine, ghostTokens map[string]string) *Server {
-	// Never follow 3xx redirects and disable auto Accept-Encoding: gzip so upstream
-	// compressed bodies can never smuggle secrets past the sliding-window scrubber.
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
@@ -47,10 +47,9 @@ func NewServer(engine *policy.Engine, ghostTokens map[string]string) *Server {
 		Mux:         http.NewServeMux(),
 	}
 	s.Mux.HandleFunc("/healthz", s.handleHealthz)
+	s.Mux.HandleFunc("/metrics", s.handleMetrics)
 	s.Mux.HandleFunc("/gw/", s.handleGatewayProxy)
 	s.Mux.HandleFunc("/mcp/", s.handleMCPProxy)
-	s.Mux.HandleFunc("/ext_proc", s.handleExtBidirectional)
-	s.Mux.HandleFunc("/ext_mcp", s.handleExtBidirectional)
 	return s
 }
 
@@ -66,7 +65,20 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"mode":            s.Engine.Config.Agent.Mode,
 		"policy_sha256":   s.Engine.PolicySHA256,
 		"lockfile_sha256": s.Engine.LockfileSHA256,
+		"oidc_jwks":       s.Engine.OIDCVerifier != nil,
 	})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	m := &s.Engine.Metrics
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# TYPE prometheus_sidecar_requests_total counter\nprometheus_sidecar_requests_total %d\n", m.RequestsTotal.Load())
+	fmt.Fprintf(w, "# TYPE prometheus_sidecar_allowed_total counter\nprometheus_sidecar_allowed_total %d\n", m.AllowedTotal.Load())
+	fmt.Fprintf(w, "# TYPE prometheus_sidecar_shadow_denied_total counter\nprometheus_sidecar_shadow_denied_total %d\n", m.ShadowDeniedTotal.Load())
+	fmt.Fprintf(w, "# TYPE prometheus_sidecar_denied_total counter\nprometheus_sidecar_denied_total %d\n", m.DeniedTotal.Load())
+	fmt.Fprintf(w, "# TYPE prometheus_sidecar_mrtr_escalated_total counter\nprometheus_sidecar_mrtr_escalated_total %d\n", m.MRTREscalated.Load())
+	fmt.Fprintf(w, "# TYPE prometheus_sidecar_rug_pulls_blocked_total counter\nprometheus_sidecar_rug_pulls_blocked_total %d\n", m.RugPullsBlocked.Load())
+	fmt.Fprintf(w, "# TYPE prometheus_sidecar_secrets_redacted_total counter\nprometheus_sidecar_secrets_redacted_total %d\n", m.SecretsRedacted.Load())
 }
 
 func resolveSecret(source string) (string, error) {
@@ -99,8 +111,33 @@ func (s *Server) ActiveSecrets() []string {
 	return out
 }
 
-func (s *Server) activeSecrets() []string {
-	return s.ActiveSecrets()
+// matchPathPrefix enforces strict `/` segment boundaries (`/v1/refunds` matches
+// `/v1/refunds` or `/v1/refunds/123`, NEVER `/v1/refunds_admin`).
+func matchPathPrefix(relPath, prefix string) bool {
+	if prefix == "/" {
+		return strings.HasPrefix(relPath, "/")
+	}
+	trimmed := strings.TrimRight(prefix, "/")
+	if relPath == trimmed {
+		return true
+	}
+	return strings.HasPrefix(relPath, trimmed+"/")
+}
+
+func constantTimeMatchesGhost(r *http.Request, expectedGhost string) bool {
+	exp := []byte(expectedGhost)
+	auth := strings.TrimSpace(r.Header.Get("Authorization"))
+	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		got := []byte(strings.TrimSpace(auth[7:]))
+		if len(got) == len(exp) && subtle.ConstantTimeCompare(got, exp) == 1 {
+			return true
+		}
+	}
+	apiKey := []byte(strings.TrimSpace(r.Header.Get("X-API-Key")))
+	if len(apiKey) == len(exp) && subtle.ConstantTimeCompare(apiKey, exp) == 1 {
+		return true
+	}
+	return false
 }
 
 // ============================================================================
@@ -108,13 +145,20 @@ func (s *Server) activeSecrets() []string {
 // ============================================================================
 
 func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
-	// Reject ambiguous multi-Host smuggling
 	if len(r.Header.Values("Host")) > 1 {
 		http.Error(w, `{"error":"ambiguous_host_header"}`, http.StatusBadRequest)
 		return
 	}
 
-	trimmed := strings.TrimPrefix(r.URL.Path, "/gw/")
+	// Use EscapedPath so `%23`/`%3f`/`..` cannot smuggle fragments, query injection, or traversal
+	escaped := r.URL.EscapedPath()
+	lowerEsc := strings.ToLower(escaped)
+	if strings.Contains(lowerEsc, "%23") || strings.Contains(lowerEsc, "%3f") || strings.Contains(escaped, "..") || strings.Contains(escaped, "@") {
+		http.Error(w, `{"error":"unsafe_encoded_path"}`, http.StatusForbidden)
+		return
+	}
+
+	trimmed := strings.TrimPrefix(escaped, "/gw/")
 	parts := strings.SplitN(trimmed, "/", 2)
 	if len(parts) == 0 || parts[0] == "" {
 		http.Error(w, `{"error":"missing_credential_slot"}`, http.StatusBadRequest)
@@ -132,13 +176,6 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject URL userinfo (`@`) smuggling in path
-	if strings.Contains(relPath, "@") {
-		http.Error(w, `{"error":"userinfo_not_permitted"}`, http.StatusForbidden)
-		return
-	}
-
-	// Verify HTTP method allowlist
 	if len(slot.AllowedMethods) > 0 {
 		allowed := false
 		for _, m := range slot.AllowedMethods {
@@ -153,11 +190,10 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Verify path prefix allowlist
 	if len(slot.AllowedPathPrefixes) > 0 {
 		allowed := false
 		for _, pfx := range slot.AllowedPathPrefixes {
-			if strings.HasPrefix(relPath, pfx) {
+			if matchPathPrefix(relPath, pfx) {
 				allowed = true
 				break
 			}
@@ -168,7 +204,6 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Verify target upstream host matches allowed_hosts
 	upstreamBase, err := url.Parse(strings.TrimRight(slot.UpstreamBaseURL, "/"))
 	if err != nil || upstreamBase.Hostname() == "" {
 		http.Error(w, `{"error":"invalid_upstream_base_url"}`, http.StatusBadGateway)
@@ -188,11 +223,8 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// If a ghost token is registered for this slot, verify caller presented it (fail closed)
 	if expectedGhost, hasGhost := s.GhostTokens[slotName]; hasGhost && expectedGhost != "" {
-		authHdr := r.Header.Get("Authorization")
-		apiKeyHdr := r.Header.Get("X-API-Key")
-		if !strings.Contains(authHdr, expectedGhost) && apiKeyHdr != expectedGhost {
+		if !constantTimeMatchesGhost(r, expectedGhost) {
 			http.Error(w, `{"error":"invalid_ghost_token"}`, http.StatusUnauthorized)
 			return
 		}
@@ -209,14 +241,13 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 		targetURL += "?" + r.URL.RawQuery
 	}
 
-	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	upReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
 		http.Error(w, `{"error":"upstream_request_build_failed"}`, http.StatusBadGateway)
 		return
 	}
 	for k, vals := range r.Header {
 		kl := strings.ToLower(k)
-		// Strip Accept-Encoding so compressed upstream bodies cannot hide leaked secrets
 		if kl == "host" || kl == "accept-encoding" || kl == "authorization" || kl == "x-api-key" {
 			continue
 		}
@@ -224,7 +255,6 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 			upReq.Header.Add(k, v)
 		}
 	}
-	// Inject real credential exclusively at the gateway egress boundary
 	upReq.Header.Set("Authorization", "Bearer "+realSecret)
 
 	upResp, err := s.HTTPClient.Do(upReq)
@@ -234,22 +264,29 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upResp.Body.Close()
 
-	// Refuse 3xx redirects rather than forwarding credentials or leaking redirect targets
 	if !slot.FollowRedirects && upResp.StatusCode >= 300 && upResp.StatusCode < 400 {
 		http.Error(w, `{"error":"upstream_redirect_blocked_by_broker"}`, http.StatusBadGateway)
 		return
 	}
 
-	secretsToScrub := []string{realSecret}
+	// Refuse compressed responses when response scrubbing is enabled so gzip cannot hide secrets
+	if ce := strings.ToLower(strings.TrimSpace(upResp.Header.Get("Content-Encoding"))); slot.RedactInResponses && ce != "" && ce != "identity" {
+		http.Error(w, `{"error":"compressed_upstream_response_rejected"}`, http.StatusBadGateway)
+		return
+	}
+
+	secretsToScrub := s.ActiveSecrets()
 	for k, vals := range upResp.Header {
 		kl := strings.ToLower(k)
-		// Drop Content-Length when redacting so modified chunked streams never corrupt framing
 		if slot.RedactInResponses && kl == "content-length" {
 			continue
 		}
 		for _, v := range vals {
 			if slot.RedactInResponses {
-				scrubbedVal, _ := scrub.ScrubBytes([]byte(v), secretsToScrub)
+				scrubbedVal, hits := scrub.ScrubBytes([]byte(v), secretsToScrub)
+				if hits > 0 {
+					s.Engine.Metrics.SecretsRedacted.Add(int64(hits))
+				}
 				v = string(scrubbedVal)
 			}
 			w.Header().Add(k, v)
@@ -258,15 +295,16 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(upResp.StatusCode)
 
 	if !slot.RedactInResponses {
-		_, _ = io.Copy(w, upResp.Body)
+		_, _ = io.Copy(w, io.LimitReader(upResp.Body, maxBodyBytes))
 		return
 	}
 
 	scrubber := scrub.NewSlidingWindowScrubber(w, secretsToScrub)
 	buf := make([]byte, 4096)
 	flusher, canFlush := w.(http.Flusher)
+	limited := io.LimitReader(upResp.Body, maxBodyBytes)
 	for {
-		n, readErr := upResp.Body.Read(buf)
+		n, readErr := limited.Read(buf)
 		if n > 0 {
 			_, _ = scrubber.Write(buf[:n])
 			if canFlush {
@@ -278,6 +316,9 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = scrubber.Flush()
+	if scrubber.RedactedHits > 0 {
+		s.Engine.Metrics.SecretsRedacted.Add(int64(scrubber.RedactedHits))
+	}
 	if canFlush {
 		flusher.Flush()
 	}
@@ -296,7 +337,7 @@ type jsonRPCRequest struct {
 
 func writeJSONRPCError(w http.ResponseWriter, id any, code int, message string, data any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK) // MCP JSON-RPC carries protocol errors in the JSON-RPC envelope
+	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -317,14 +358,20 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(r.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 	if err != nil {
 		http.Error(w, `{"error":"failed_to_read_body"}`, http.StatusBadRequest)
 		return
 	}
 
+	trimmedBody := bytes.TrimSpace(bodyBytes)
+	if len(trimmedBody) > 0 && trimmedBody[0] == '[' {
+		writeJSONRPCError(w, nil, -32600, "JSON-RPC batch requests are not permitted by Prometheus policy", nil)
+		return
+	}
+
 	var rpcReq jsonRPCRequest
-	if err := json.Unmarshal(bodyBytes, &rpcReq); err != nil {
+	if err := json.Unmarshal(trimmedBody, &rpcReq); err != nil {
 		http.Error(w, `{"error":"invalid_jsonrpc"}`, http.StatusBadRequest)
 		return
 	}
@@ -336,7 +383,6 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	oboPrincipal := s.Engine.ResolveOBOPrincipal(r.Context(), r.Header)
 	idemKey := r.Header.Get("Idempotency-Key")
 
-	// Request phase: evaluate parameter bounds & OBO identity for tools/call
 	if rpcReq.Method == "tools/call" {
 		toolName, _ := rpcReq.Params["name"].(string)
 		argsMap, _ := rpcReq.Params["arguments"].(map[string]any)
@@ -348,8 +394,18 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 				idemKey = ik
 			}
 		}
+		mrtrTok := r.Header.Get("X-Prometheus-MRTR-Approval")
+		if mrtrTok == "" {
+			if irs, ok := rpcReq.Params["inputResponses"].([]any); ok && len(irs) > 0 {
+				if first, ok := irs[0].(map[string]any); ok {
+					if tok, ok := first["approval_token"].(string); ok {
+						mrtrTok = tok
+					}
+				}
+			}
+		}
 
-		ev := s.Engine.EvaluateToolCall(traceparent, serverName, toolName, argsMap, oboPrincipal, idemKey)
+		ev := s.Engine.EvaluateToolCall(traceparent, serverName, toolName, argsMap, oboPrincipal, idemKey, mrtrTok)
 		latMs := float64(time.Since(start).Microseconds()) / 1000.0
 		_, _ = s.Engine.AppendLedgerRecord(traceparent, serverName, toolName, argsMap, ev, oboPrincipal, idemKey, latMs)
 
@@ -358,18 +414,22 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ev.Verdict == "mrtr_escalate" {
-			writeJSONRPCError(w, rpcReq.ID, -32002, "Prometheus MRTR Out-of-Band Approval Required", ev)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(s.Engine.BuildMRTRInputRequiredPayload(rpcReq.ID, serverName, toolName, argsMap, oboPrincipal, ev))
 			return
 		}
 	}
 
-	// Forward upstream MCP request (stripping Accept-Encoding for response inspection/scrubbing)
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, srvCfg.URL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		http.Error(w, `{"error":"mcp_upstream_build_failed"}`, http.StatusBadGateway)
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
+	upReq.Header.Set("Accept", "application/json, text/event-stream")
+	upReq.Header.Set("MCP-Protocol-Version", "2026-07-28")
+	upReq.Header.Set("Mcp-Method", rpcReq.Method)
 	upReq.Header.Set("traceparent", traceparent)
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		upReq.Header.Set("Authorization", auth)
@@ -382,133 +442,47 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	defer upResp.Body.Close()
 
-	respBytes, err := io.ReadAll(upResp.Body)
+	if ce := strings.ToLower(strings.TrimSpace(upResp.Header.Get("Content-Encoding"))); ce != "" && ce != "identity" {
+		writeJSONRPCError(w, rpcReq.ID, -32001, "Compressed upstream MCP response rejected", map[string]any{"content_encoding": ce})
+		return
+	}
+
+	respBytes, err := io.ReadAll(io.LimitReader(upResp.Body, maxBodyBytes))
 	if err != nil {
 		http.Error(w, `{"error":"mcp_response_read_failed"}`, http.StatusBadGateway)
 		return
 	}
 
-	// Response phase 1: verify live `tools/list` against `prometheus.lock` (blocks rug pulls!)
+	respContentType := upResp.Header.Get("Content-Type")
 	if rpcReq.Method == "tools/list" {
-		var rpcResp map[string]any
-		if json.Unmarshal(respBytes, &rpcResp) == nil {
-			if resultObj, ok := rpcResp["result"].(map[string]any); ok {
-				if rawTools, ok := resultObj["tools"].([]any); ok {
-					toolsList := make([]map[string]any, 0, len(rawTools))
-					for _, item := range rawTools {
-						if m, ok := item.(map[string]any); ok {
-							toolsList = append(toolsList, m)
-						}
-					}
-					passed, drifts := s.Engine.VerifyToolsListResponse(serverName, toolsList)
-					if !passed && s.Engine.Config.Agent.Mode == "enforce" {
-						writeJSONRPCError(w, rpcReq.ID, -32001, "MCP Manifest Pin Drift / Rug Pull Blocked", map[string]any{
-							"server_name": serverName,
-							"drifts":      drifts,
-						})
-						return
-					}
-					if len(drifts) > 0 {
-						w.Header().Set("X-Prometheus-Manifest-Warnings", fmt.Sprintf("%d", len(drifts)))
-					}
-				}
+		if toolsList, ok := policy.ExtractToolsFromMCPResponse(respBytes, respContentType); ok {
+			passed, drifts := s.Engine.VerifyToolsListResponse(serverName, toolsList)
+			if !passed && s.Engine.Config.Agent.Mode == "enforce" {
+				writeJSONRPCError(w, rpcReq.ID, -32001, "MCP Manifest Pin Drift / Rug Pull Blocked", map[string]any{
+					"server_name": serverName,
+					"drifts":      drifts,
+				})
+				return
+			}
+			if len(drifts) > 0 {
+				w.Header().Set("X-Prometheus-Manifest-Warnings", fmt.Sprintf("%d", len(drifts)))
 			}
 		}
 	}
 
-	// Response phase 2: scrub any active secrets before returning to agent
-	secrets := s.activeSecrets()
+	secrets := s.ActiveSecrets()
 	if len(secrets) > 0 {
-		respBytes, _ = scrub.ScrubBytes(respBytes, secrets)
+		var hits int
+		respBytes, hits = scrub.ScrubBytes(respBytes, secrets)
+		if hits > 0 {
+			s.Engine.Metrics.SecretsRedacted.Add(int64(hits))
+		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	if respContentType == "" {
+		respContentType = "application/json"
+	}
+	w.Header().Set("Content-Type", respContentType)
 	w.WriteHeader(upResp.StatusCode)
 	_, _ = w.Write(respBytes)
-}
-
-// ============================================================================
-// 3. Bidirectional Envoy `ext_proc` / agentgateway `ExtMcp` Decision Endpoint
-// ============================================================================
-
-type ExtDecisionRequest struct {
-	Phase          string            `json:"phase"` // "request" | "response"
-	ServerName     string            `json:"server_name"`
-	Method         string            `json:"method"` // "tools/call" | "tools/list"
-	ToolName       string            `json:"tool_name,omitempty"`
-	Arguments      map[string]any    `json:"arguments,omitempty"`
-	ToolsList      []map[string]any  `json:"tools_list,omitempty"`
-	ResponseBody   string            `json:"response_body,omitempty"`
-	Headers        map[string]string `json:"headers,omitempty"`
-	IdempotencyKey string            `json:"idempotency_key,omitempty"`
-}
-
-func (s *Server) handleExtBidirectional(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	var req ExtDecisionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, `{"error":"invalid_ext_payload"}`, http.StatusBadRequest)
-		return
-	}
-
-	hdr := http.Header{}
-	for k, v := range req.Headers {
-		hdr.Set(k, v)
-	}
-	traceparent := hdr.Get(s.Engine.Config.Identity.CorrelateHeader)
-	if traceparent == "" {
-		traceparent = fmt.Sprintf("00-%016x-01", time.Now().UnixNano())
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if req.Phase == "response" {
-		if req.Method == "tools/list" {
-			passed, drifts := s.Engine.VerifyToolsListResponse(req.ServerName, req.ToolsList)
-			action := "continue"
-			if !passed && s.Engine.Config.Agent.Mode == "enforce" {
-				action = "block"
-			}
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"phase":          "response",
-				"action":         action,
-				"jsonrpc_code":   -32001,
-				"drifts":         drifts,
-				"lockfile_sha":   s.Engine.LockfileSHA256,
-			})
-			return
-		}
-		scrubbed, hits := scrub.ScrubBytes([]byte(req.ResponseBody), s.activeSecrets())
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"phase":         "response",
-			"action":        "continue",
-			"redacted_hits": hits,
-			"response_body": string(scrubbed),
-		})
-		return
-	}
-
-	// Default: request phase
-	obo := s.Engine.ResolveOBOPrincipal(r.Context(), hdr)
-	ev := s.Engine.EvaluateToolCall(traceparent, req.ServerName, req.ToolName, req.Arguments, obo, req.IdempotencyKey)
-	latMs := float64(time.Since(start).Microseconds()) / 1000.0
-	rec, _ := s.Engine.AppendLedgerRecord(traceparent, req.ServerName, req.ToolName, req.Arguments, ev, obo, req.IdempotencyKey, latMs)
-
-	action := "continue"
-	rpcCode := 0
-	if ev.Verdict == "deny" {
-		action = "block"
-		rpcCode = -32001
-	} else if ev.Verdict == "mrtr_escalate" {
-		action = "mrtr_escalate"
-		rpcCode = -32002
-	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"phase":         "request",
-		"action":        action,
-		"verdict":       ev.Verdict,
-		"jsonrpc_code":  rpcCode,
-		"violations":    ev.Violations,
-		"record_hmac":   rec.RecordHMAC,
-		"policy_sha256": s.Engine.PolicySHA256,
-	})
 }

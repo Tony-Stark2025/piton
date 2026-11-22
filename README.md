@@ -70,7 +70,11 @@ The demo runs the exact user workflow end-to-end:
 
 ```bash
 # Generate prometheus.yaml (shadow), prometheus.lock, and .env.agent
-prometheus init --repo . [--manifest observed_tools.json]
+# Add --probe to introspect live HTTP/SSE and STDIO MCP servers directly
+prometheus init --repo . [--probe] [--manifest observed_tools.json]
+
+# Wrap any local STDIO MCP server (Cursor / Claude Desktop) with live lockfile pinning & bounds
+prometheus wrap --config prometheus.yaml --lockfile prometheus.lock --server billing -- npx -y @modelcontextprotocol/server-billing
 
 # Run any local agent with zero live secrets in its process environment
 prometheus run --config prometheus.yaml -- python my_agent.py
@@ -81,14 +85,15 @@ prometheus top --traces .prometheus/traces.jsonl [--follow]
 # Verify HMAC chain integrity of the version-pinned compliance ledger
 prometheus ledger-verify --traces .prometheus/traces.jsonl
 
-# Simulate `enforce` mode over recorded shadow traffic to calibrate bounds
-prometheus replay --config prometheus.yaml --traces .prometheus/traces.jsonl --simulate-enforce
+# Simulate `enforce` mode over recorded shadow traffic OR OpenTelemetry (OTel) JSONL spans,
+# and optionally export calibrated policies for agentgateway (CEL) or ToolHive / AWS AgentCore (Cedar)
+prometheus replay --config prometheus.yaml --traces .prometheus/traces.jsonl --simulate-enforce [--export cel|cedar]
 
-# CI Pull Request gate: diff observed MCP tools/list against prometheus.lock
-prometheus lock --config prometheus.yaml --lockfile prometheus.lock --manifest observed_tools.json --diff
+# CI Pull Request gate: diff observed (or live --probe) MCP tools/list against prometheus.lock
+prometheus lock --config prometheus.yaml --lockfile prometheus.lock [--probe | --manifest observed_tools.json] --diff
 
 # Refresh approved internal MCP hashes after review
-prometheus lock --config prometheus.yaml --lockfile prometheus.lock --manifest observed_tools.json --update
+prometheus lock --config prometheus.yaml --lockfile prometheus.lock [--probe | --manifest observed_tools.json] --update
 
 # Compile prometheus.yaml to .prometheus/runtime_policy.json for the Go sidecar
 prometheus compile --config prometheus.yaml --out .prometheus/runtime_policy.json
@@ -98,20 +103,28 @@ prometheus compile --config prometheus.yaml --out .prometheus/runtime_policy.jso
 
 ## Production Envoy / Kubernetes Deployment
 
-Build the standalone static Go sidecar binary:
+Build the standalone static Go sidecar binary or distroless non-root container image (`sidecar/Dockerfile`):
 
 ```bash
+# Static binary
 cd sidecar
-CGO_ENABLED=0 go build -o bin/prometheus-sidecar ./cmd/prometheus-sidecar
-./bin/prometheus-sidecar \
+CGO_ENABLED=0 go build -trimpath -o bin/prometheus-sidecar ./cmd/prometheus-sidecar
+PROMETHEUS_LEDGER_SIGNING_KEY="$(openssl rand -hex 32)" ./bin/prometheus-sidecar \
   --policy .prometheus/runtime_policy.json \
   --lock prometheus.lock \
   --traces /var/log/prometheus/traces.jsonl \
   --addr 127.0.0.1:8080 \
   --grpc-addr 127.0.0.1:50051
+
+# Or distroless non-root Kubernetes image
+docker build -t prometheus-sidecar:latest -f sidecar/Dockerfile sidecar/
 ```
 
-Wire Envoy's `envoy.filters.http.ext_proc` filter to `127.0.0.1:50051` using the included reference config [sidecar/deploy/envoy-ext-proc.yaml](sidecar/deploy/envoy-ext-proc.yaml).
+Production SRE features built into the Go sidecar:
+- **Official Envoy v3 `ext_proc` + `grpc.health.v1`** on port `50051` (reference Envoy config with gRPC health checks and `2s` `message_timeout` in [sidecar/deploy/envoy-ext-proc.yaml](sidecar/deploy/envoy-ext-proc.yaml)).
+- **Prometheus `/metrics`** exposition (requests, blocks, shadow denies, MRTR escalations, manifest drift, OIDC failures, secret redactions).
+- **MCP `2026-07-28` Multi-Request Tool Resolution (MRTR)** returning structured `resultType: "input_required"` + HMAC-signed `requestState` approval tokens for human-in-the-loop escalations.
+- **Bounded memory & graceful shutdown**: rolling 1-hour per-principal call/monetary budgets, bounded TTL idempotency/trace caches, 10 MiB payload caps, HTTP server timeouts, and `SIGTERM`/`SIGINT` graceful drain.
 
 ---
 
@@ -121,8 +134,9 @@ Wire Envoy's `envoy.filters.http.ext_proc` filter to `127.0.0.1:50051` using the
 # Go sidecar unit + race + Envoy v3 gRPC ext_proc + OIDC RS256/ES256 JWKS tests
 (cd sidecar && go test -race -v ./...)
 
-# Python control loop + cross-language Go<->Python integration + security test suites
-pytest tests/test_sidecar_integration.py \
+# Python control loop + live MCP probe/wrap + CEL/Cedar export + cross-language Go<->Python suites
+pytest tests/test_sprint_abc_hardening_and_probe.py \
+       tests/test_sidecar_integration.py \
        tests/test_agent_control_loop_v3.py \
        tests/test_ifc_and_patch_risk_gate.py \
        tests/test_security_hardening_fixes.py \

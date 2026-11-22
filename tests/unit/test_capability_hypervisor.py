@@ -110,12 +110,12 @@ class TestTokenAuthorityAndAttenuation:
         assert denial.denial_code == DenialCode.EXPIRED_ACTION_TOKEN
 
     def test_unauthorized_method_denial(self, token_authority, root_token):
-        denial = token_authority.validate_action(root_token, "PATCH", "res-101")
+        denial = token_authority.validate_action(root_token, "PATCH", "res-101", tenant_id="tenant-corp")
         assert denial is not None
         assert denial.denial_code == DenialCode.UNAUTHORIZED_METHOD_SCOPE
 
     def test_unauthorized_resource_denial(self, token_authority, root_token):
-        denial = token_authority.validate_action(root_token, "GET", "res-999")
+        denial = token_authority.validate_action(root_token, "GET", "res-999", tenant_id="tenant-corp")
         assert denial is not None
         assert denial.denial_code == DenialCode.UNAUTHORIZED_RESOURCE_SCOPE
 
@@ -250,7 +250,7 @@ class TestStateInvariantGate:
 
     def test_mutation_without_prior_read_fails_lineage(self, token_authority, root_token):
         registry = StateWitnessRegistry(token_authority)
-        registry.register_state("res-101", {"status": "active"})
+        registry.register_state("res-101", {"status": "active"}, tenant_id="tenant-corp")
         gate = StateInvariantGate(token_authority, registry)
 
         # Attempting mutation without reading res-101 in ses-1
@@ -261,6 +261,7 @@ class TestStateInvariantGate:
             resource_id="res-101",
             permit=None,
             token=root_token,
+            tenant_id="tenant-corp",
         )
         assert denial is not None
         assert denial.denial_code == DenialCode.CAUSAL_LINEAGE_VIOLATION
@@ -268,11 +269,11 @@ class TestStateInvariantGate:
 
     def test_mutation_with_prior_read_but_missing_permit(self, token_authority, root_token):
         registry = StateWitnessRegistry(token_authority)
-        witness = registry.register_state("res-101", {"status": "active"})
+        witness = registry.register_state("res-101", {"status": "active"}, tenant_id="tenant-corp")
         gate = StateInvariantGate(token_authority, registry)
 
         # Record prior read
-        gate.lineage_tracker.record_read("ses-1", "res-101", witness, "GET /api/v1/resources/res-101")
+        gate.lineage_tracker.record_read("ses-1", "res-101", witness, "GET /api/v1/resources/res-101", tenant_id="tenant-corp")
 
         # Mutate without permit
         denial = gate.verify_execution_gate(
@@ -282,15 +283,16 @@ class TestStateInvariantGate:
             resource_id="res-101",
             permit=None,
             token=root_token,
+            tenant_id="tenant-corp",
         )
         assert denial is not None
         assert denial.denial_code == DenialCode.MISSING_ACTION_PERMIT
 
     def test_action_permit_replay_prevented(self, token_authority, root_token):
         registry = StateWitnessRegistry(token_authority)
-        witness = registry.register_state("res-101", {"status": "active"})
+        witness = registry.register_state("res-101", {"status": "active"}, tenant_id="tenant-corp")
         gate = StateInvariantGate(token_authority, registry)
-        gate.lineage_tracker.record_read("ses-1", "res-101", witness, "GET")
+        gate.lineage_tracker.record_read("ses-1", "res-101", witness, "GET", tenant_id="tenant-corp")
 
         permit = token_authority.mint_action_permit(root_token, "PUT", "res-101", witness)
 
@@ -302,6 +304,7 @@ class TestStateInvariantGate:
             resource_id="res-101",
             permit=permit,
             token=root_token,
+            tenant_id="tenant-corp",
         )
         assert first_denial is None
 

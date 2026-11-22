@@ -1,6 +1,7 @@
 package extproc
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,20 +18,17 @@ import (
 )
 
 // Server implements the official Envoy v3 `envoy.service.ext_proc.v3.ExternalProcessor`
-// bidirectional gRPC streaming filter for Envoy Proxy, Envoy AI Gateway / Agent Router,
-// and Istio service meshes.
-//
-// Capabilities on a single bidirectional gRPC stream:
-//   1. RequestHeaders: Captures path/MCP server/OBO auth/traceparent and strips `accept-encoding`.
-//   2. RequestBody:    Enforces cryptographic OIDC/OBO identity, parameter bounds, single-use
-//                      idempotency, and per-trace rate limits; writes HMAC-chained ledger;
-//                      returns valid MCP JSON-RPC -32001 / -32002 ImmediateResponses (never bare 403).
-//   3. ResponseHeaders: Drops `content-length` so body scrubbing never corrupts HTTP/1.1 framing.
-//   4. ResponseBody:   Verifies live `tools/list` against `prometheus.lock` (blocks rug pulls with
-//                      JSON-RPC -32001) and scrubs active secrets via BodyMutation.
+// bidirectional gRPC streaming filter (audit-hardened):
+//   - Derives MCP server strictly from `:path` (ignores untrusted client `X-MCP-Server` headers)
+//   - Rejects JSON-RPC batch arrays `[...]` (fail closed)
+//   - Enforces RS256/ES256 OIDC JWKS, parameter bounds, rolling 1h principal budgets, and
+//     spec-compliant MCP 2026-07-28 MRTR `input_required` + signed `requestState`
+//   - Parses BOTH JSON and `text/event-stream` SSE `tools/list` responses
+//   - Rejects compressed upstream `Content-Encoding` responses that would bypass scrubbing
+//   - Uses valid `BodyMutation` during `ResponseBody` (never invalid post-header `ImmediateResponse`)
 type Server struct {
 	ext_procv3.UnimplementedExternalProcessorServer
-	Engine         *policy.Engine
+	Engine          *policy.Engine
 	SecretsProvider func() []string
 }
 
@@ -56,10 +54,9 @@ func headerMapToHTTP(hm *corev3.HeaderMap) http.Header {
 	return out
 }
 
-func extractMCPServerFromPath(path string, hdr http.Header) string {
-	if explicit := strings.TrimSpace(hdr.Get("X-MCP-Server")); explicit != "" {
-		return explicit
-	}
+// extractMCPServerFromPath derives the MCP server strictly from Envoy's routed `:path`
+// (`/mcp/{server}`) and NEVER trusts client-supplied `X-MCP-Server` headers.
+func extractMCPServerFromPath(path string) string {
 	clean := strings.Split(path, "?")[0]
 	if strings.HasPrefix(clean, "/mcp/") {
 		rest := strings.TrimPrefix(clean, "/mcp/")
@@ -68,19 +65,11 @@ func extractMCPServerFromPath(path string, hdr http.Header) string {
 			return parts[0]
 		}
 	}
-	return "default"
+	return ""
 }
 
-func jsonRPCImmediateResponse(id any, code int, message string, data any) *ext_procv3.ProcessingResponse {
-	bodyBytes, _ := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"error": map[string]any{
-			"code":    code,
-			"message": message,
-			"data":    data,
-		},
-	})
+func immediateJSONResponse(payload any) *ext_procv3.ProcessingResponse {
+	bodyBytes, _ := json.Marshal(payload)
 	return &ext_procv3.ProcessingResponse{
 		Response: &ext_procv3.ProcessingResponse_ImmediateResponse{
 			ImmediateResponse: &ext_procv3.ImmediateResponse{
@@ -107,13 +96,27 @@ func jsonRPCImmediateResponse(id any, code int, message string, data any) *ext_p
 	}
 }
 
+func jsonRPCErrorPayload(id any, code int, message string, data any) map[string]any {
+	return map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+			"data":    data,
+		},
+	}
+}
+
 type streamState struct {
-	startTime   time.Time
-	headers     http.Header
-	serverName  string
-	traceparent string
-	rpcMethod   string
-	rpcID       any
+	startTime       time.Time
+	headers         http.Header
+	serverName      string
+	traceparent     string
+	rpcMethod       string
+	rpcID           any
+	respContentType string
+	respEncoding    string
 }
 
 func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) error {
@@ -138,14 +141,12 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 		case *ext_procv3.ProcessingRequest_RequestHeaders:
 			st.startTime = time.Now()
 			st.headers = headerMapToHTTP(phase.RequestHeaders.GetHeaders())
-			path := st.headers.Get(":path")
-			st.serverName = extractMCPServerFromPath(path, st.headers)
+			st.serverName = extractMCPServerFromPath(st.headers.Get(":path"))
 			st.traceparent = st.headers.Get(s.Engine.Config.Identity.CorrelateHeader)
 			if st.traceparent == "" {
 				st.traceparent = fmt.Sprintf("00-%016x-01", time.Now().UnixNano())
 			}
 
-			// Strip Accept-Encoding so upstream responses arrive uncompressed for inspection/scrubbing
 			resp = &ext_procv3.ProcessingResponse{
 				Response: &ext_procv3.ProcessingResponse_RequestHeaders{
 					RequestHeaders: &ext_procv3.HeadersResponse{
@@ -168,7 +169,15 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 			}
 
 		case *ext_procv3.ProcessingRequest_RequestBody:
-			body := phase.RequestBody.GetBody()
+			body := bytes.TrimSpace(phase.RequestBody.GetBody())
+			// Fail closed on JSON-RPC batch arrays `[...]`
+			if len(body) > 0 && body[0] == '[' {
+				if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(nil, -32600, "JSON-RPC batch requests are not permitted by Prometheus policy", nil))); err != nil {
+					return err
+				}
+				continue
+			}
+
 			var rpcReq struct {
 				JSONRPC string         `json:"jsonrpc"`
 				ID      any            `json:"id"`
@@ -191,6 +200,16 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 							idemKey = ik
 						}
 					}
+					mrtrTok := st.headers.Get("X-Prometheus-MRTR-Approval")
+					if mrtrTok == "" {
+						if irs, ok := rpcReq.Params["inputResponses"].([]any); ok && len(irs) > 0 {
+							if first, ok := irs[0].(map[string]any); ok {
+								if tok, ok := first["approval_token"].(string); ok {
+									mrtrTok = tok
+								}
+							}
+						}
+					}
 
 					oboPrincipal := s.Engine.ResolveOBOPrincipal(ctx, st.headers)
 					ev := s.Engine.EvaluateToolCall(
@@ -200,6 +219,7 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 						argsMap,
 						oboPrincipal,
 						idemKey,
+						mrtrTok,
 					)
 					latMs := float64(time.Since(st.startTime).Microseconds()) / 1000.0
 					_, _ = s.Engine.AppendLedgerRecord(
@@ -214,13 +234,14 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 					)
 
 					if ev.Verdict == "deny" {
-						if err := stream.Send(jsonRPCImmediateResponse(rpcReq.ID, -32001, "Prometheus Policy Denial", ev)); err != nil {
+						if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(rpcReq.ID, -32001, "Prometheus Policy Denial", ev))); err != nil {
 							return err
 						}
 						continue
 					}
 					if ev.Verdict == "mrtr_escalate" {
-						if err := stream.Send(jsonRPCImmediateResponse(rpcReq.ID, -32002, "Prometheus MRTR Out-of-Band Approval Required", ev)); err != nil {
+						mrtrPayload := s.Engine.BuildMRTRInputRequiredPayload(rpcReq.ID, st.serverName, toolName, argsMap, oboPrincipal, ev)
+						if err := stream.Send(immediateJSONResponse(mrtrPayload)); err != nil {
 							return err
 						}
 						continue
@@ -239,7 +260,20 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 			}
 
 		case *ext_procv3.ProcessingRequest_ResponseHeaders:
-			// Drop Content-Length so downstream response-body scrubbing never corrupts framing
+			respHdrs := headerMapToHTTP(phase.ResponseHeaders.GetHeaders())
+			st.respContentType = respHdrs.Get("Content-Type")
+			st.respEncoding = strings.ToLower(strings.TrimSpace(respHdrs.Get("Content-Encoding")))
+
+			// Reject unexpected compressed responses that could smuggle secrets or poisoned tools past inspection
+			if st.respEncoding != "" && st.respEncoding != "identity" {
+				if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(st.rpcID, -32001, "Compressed upstream response rejected by Prometheus inspection policy", map[string]any{
+					"content_encoding": st.respEncoding,
+				}))); err != nil {
+					return err
+				}
+				continue
+			}
+
 			resp = &ext_procv3.ProcessingResponse{
 				Response: &ext_procv3.ProcessingResponse_ResponseHeaders{
 					ResponseHeaders: &ext_procv3.HeadersResponse{
@@ -255,41 +289,34 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 
 		case *ext_procv3.ProcessingRequest_ResponseBody:
 			respBody := phase.ResponseBody.GetBody()
+			var bodyMut *ext_procv3.BodyMutation
 
-			// 1. Live `tools/list` manifest pin verification against `prometheus.lock`
+			// 1. Live `tools/list` manifest pin + runtime poisoning verification (JSON + SSE!)
+			// Uses BodyMutation (valid Envoy v3 ext_proc semantics after ResponseHeaders CONTINUE).
 			if st.rpcMethod == "tools/list" && len(respBody) > 0 {
-				var rpcResp map[string]any
-				if json.Unmarshal(respBody, &rpcResp) == nil {
-					if resultObj, ok := rpcResp["result"].(map[string]any); ok {
-						if rawTools, ok := resultObj["tools"].([]any); ok {
-							toolsList := make([]map[string]any, 0, len(rawTools))
-							for _, item := range rawTools {
-								if m, ok := item.(map[string]any); ok {
-									toolsList = append(toolsList, m)
-								}
-							}
-							passed, drifts := s.Engine.VerifyToolsListResponse(st.serverName, toolsList)
-							if !passed && s.Engine.Config.Agent.Mode == "enforce" {
-								if err := stream.Send(jsonRPCImmediateResponse(st.rpcID, -32001, "MCP Manifest Pin Drift / Rug Pull Blocked", map[string]any{
-									"server_name": st.serverName,
-									"drifts":      drifts,
-								})); err != nil {
-									return err
-								}
-								continue
-							}
+				if toolsList, ok := policy.ExtractToolsFromMCPResponse(respBody, st.respContentType); ok {
+					passed, drifts := s.Engine.VerifyToolsListResponse(st.serverName, toolsList)
+					if !passed && s.Engine.Config.Agent.Mode == "enforce" {
+						errBytes, _ := json.Marshal(jsonRPCErrorPayload(st.rpcID, -32001, "MCP Manifest Pin Drift / Rug Pull Blocked", map[string]any{
+							"server_name": st.serverName,
+							"drifts":      drifts,
+						}))
+						bodyMut = &ext_procv3.BodyMutation{
+							Mutation: &ext_procv3.BodyMutation_Body{
+								Body: errBytes,
+							},
 						}
 					}
 				}
 			}
 
 			// 2. Response-phase secret scrubbing via BodyMutation
-			var bodyMut *ext_procv3.BodyMutation
-			if s.SecretsProvider != nil && len(respBody) > 0 {
+			if bodyMut == nil && s.SecretsProvider != nil && len(respBody) > 0 {
 				secrets := s.SecretsProvider()
 				if len(secrets) > 0 {
 					scrubbed, hits := scrub.ScrubBytes(respBody, secrets)
 					if hits > 0 {
+						s.Engine.Metrics.SecretsRedacted.Add(int64(hits))
 						bodyMut = &ext_procv3.BodyMutation{
 							Mutation: &ext_procv3.BodyMutation_Body{
 								Body: scrubbed,

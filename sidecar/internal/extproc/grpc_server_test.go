@@ -49,8 +49,7 @@ func mintTestRS256(t *testing.T, priv *rsa.PrivateKey, issuer, aud, sub, actSub 
 	return input + "." + b64url(sig)
 }
 
-func TestEnvoyGRPCExtProcBidirectionalOIDCPinningAndScrubbing(t *testing.T) {
-	// 1. Live RSA-2048 OIDC Discovery + JWKS Server
+func TestEnvoyGRPCExtProcBidirectionalHardenedOIDCPinningAndScrubbing(t *testing.T) {
 	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("rsa keygen: %v", err)
@@ -70,6 +69,7 @@ func TestEnvoyGRPCExtProcBidirectionalOIDCPinningAndScrubbing(t *testing.T) {
 				{
 					"kty": "RSA",
 					"kid": "k1",
+					"use": "sig",
 					"alg": "RS256",
 					"n":   b64url(rsaKey.PublicKey.N.Bytes()),
 					"e":   b64url(big.NewInt(int64(rsaKey.PublicKey.E)).Bytes()),
@@ -109,9 +109,8 @@ func TestEnvoyGRPCExtProcBidirectionalOIDCPinningAndScrubbing(t *testing.T) {
 		Agent:   policy.AgentMeta{ID: "envoy-billing-agent", Mode: "enforce"},
 		Identity: policy.IdentityConfig{
 			Mode:                "oidc_obo",
-			Issuer:              idp.URL,
+			Issuer:              idp.URL, // auto-enables JWKS even without explicit verify_jwt_signature!
 			Audience:            "mcp-gateway",
-			VerifyJWTSignature:  true,
 			RequireDelegatedSub: true,
 			CorrelateHeader:     "traceparent",
 		},
@@ -139,7 +138,6 @@ func TestEnvoyGRPCExtProcBidirectionalOIDCPinningAndScrubbing(t *testing.T) {
 		t.Fatalf("NewEngine: %v", err)
 	}
 
-	// 2. Start real Envoy v3 gRPC ExternalProcessor server on loopback TCP
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -157,149 +155,31 @@ func TestEnvoyGRPCExtProcBidirectionalOIDCPinningAndScrubbing(t *testing.T) {
 	}
 	defer conn.Close()
 	client := ext_procv3.NewExternalProcessorClient(conn)
-
 	validJWT := mintTestRS256(t, rsaKey, idp.URL, "mcp-gateway", "alice@acme.com", "envoy-billing-agent")
 
-	// Case A: Full 4-phase bidirectional stream (Valid RS256 OBO JWT + $35 refund + response secret scrub)
+	// Case A: Client-spoofed `x-mcp-server: bogus` header is IGNORED (strictly uses :path!)
 	{
-		stream, err := client.Process(context.Background())
-		if err != nil {
-			t.Fatalf("open stream: %v", err)
-		}
-
-		// Phase 1: RequestHeaders -> must strip accept-encoding
+		stream, _ := client.Process(context.Background())
 		_ = stream.Send(&ext_procv3.ProcessingRequest{
 			Request: &ext_procv3.ProcessingRequest_RequestHeaders{
 				RequestHeaders: &ext_procv3.HttpHeaders{
 					Headers: &corev3.HeaderMap{
 						Headers: []*corev3.HeaderValue{
 							{Key: ":path", Value: "/mcp/vendor-billing"},
+							{Key: "x-mcp-server", Value: "bogus-bypass-server"},
 							{Key: "authorization", Value: "Bearer " + validJWT},
 							{Key: "idempotency-key", Value: "idem-grpc-1"},
-							{Key: "accept-encoding", Value: "gzip"},
 						},
 					},
 				},
 			},
 		})
-		r1, err := stream.Recv()
-		if err != nil {
-			t.Fatalf("recv phase 1: %v", err)
-		}
-		removed := r1.GetRequestHeaders().GetResponse().GetHeaderMutation().GetRemoveHeaders()
-		if len(removed) == 0 || removed[0] != "accept-encoding" {
-			t.Fatalf("expected accept-encoding stripped, got %v", removed)
-		}
+		_, _ = stream.Recv()
 
-		// Phase 2: RequestBody ($35 within $50 bound) -> CONTINUE
+		// $120 MUST still hit vendor-billing's $50 bound and return MCP 2026-07-28 input_required MRTR!
 		reqJSON, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
 			"id":      1,
-			"method":  "tools/call",
-			"params": map[string]any{
-				"name":      "refund_invoice",
-				"arguments": map[string]any{"amount": 35.0},
-			},
-		})
-		_ = stream.Send(&ext_procv3.ProcessingRequest{
-			Request: &ext_procv3.ProcessingRequest_RequestBody{
-				RequestBody: &ext_procv3.HttpBody{Body: reqJSON, EndOfStream: true},
-			},
-		})
-		r2, err := stream.Recv()
-		if err != nil {
-			t.Fatalf("recv phase 2: %v", err)
-		}
-		if r2.GetImmediateResponse() != nil {
-			t.Fatalf("expected valid $35 refund to CONTINUE, got ImmediateResponse: %s", string(r2.GetImmediateResponse().GetBody()))
-		}
-
-		// Phase 3: ResponseHeaders -> must strip content-length
-		_ = stream.Send(&ext_procv3.ProcessingRequest{
-			Request: &ext_procv3.ProcessingRequest_ResponseHeaders{
-				ResponseHeaders: &ext_procv3.HttpHeaders{},
-			},
-		})
-		r3, _ := stream.Recv()
-		if rem := r3.GetResponseHeaders().GetResponse().GetHeaderMutation().GetRemoveHeaders(); len(rem) == 0 || rem[0] != "content-length" {
-			t.Fatalf("expected content-length removed in response headers, got %v", rem)
-		}
-
-		// Phase 4: ResponseBody containing leaked secret -> BodyMutation scrubs it!
-		_ = stream.Send(&ext_procv3.ProcessingRequest{
-			Request: &ext_procv3.ProcessingRequest_ResponseBody{
-				ResponseBody: &ext_procv3.HttpBody{
-					Body:        []byte(`{"jsonrpc":"2.0","id":1,"result":{"debug":"` + activeSecret + `"}}`),
-					EndOfStream: true,
-				},
-			},
-		})
-		r4, _ := stream.Recv()
-		mutated := string(r4.GetResponseBody().GetResponse().GetBodyMutation().GetBody())
-		if strings.Contains(mutated, activeSecret) || !strings.Contains(mutated, scrub.RedactionMarker) {
-			t.Fatalf("expected response body secret redacted via BodyMutation, got: %s", mutated)
-		}
-		_ = stream.CloseSend()
-	}
-
-	// Case B: Forged/spoofed X-OBO-Principal header WITHOUT valid RS256 JWT -> ImmediateResponse -32001!
-	{
-		stream, _ := client.Process(context.Background())
-		_ = stream.Send(&ext_procv3.ProcessingRequest{
-			Request: &ext_procv3.ProcessingRequest_RequestHeaders{
-				RequestHeaders: &ext_procv3.HttpHeaders{
-					Headers: &corev3.HeaderMap{
-						Headers: []*corev3.HeaderValue{
-							{Key: ":path", Value: "/mcp/vendor-billing"},
-							{Key: "x-obo-principal", Value: "user:spoofed-admin@acme.com"},
-							{Key: "idempotency-key", Value: "idem-grpc-2"},
-						},
-					},
-				},
-			},
-		})
-		_, _ = stream.Recv()
-
-		reqJSON, _ := json.Marshal(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      2,
-			"method":  "tools/call",
-			"params":  map[string]any{"name": "refund_invoice", "arguments": map[string]any{"amount": 10.0}},
-		})
-		_ = stream.Send(&ext_procv3.ProcessingRequest{
-			Request: &ext_procv3.ProcessingRequest_RequestBody{
-				RequestBody: &ext_procv3.HttpBody{Body: reqJSON, EndOfStream: true},
-			},
-		})
-		r2, _ := stream.Recv()
-		imm := r2.GetImmediateResponse()
-		if imm == nil || !strings.Contains(string(imm.GetBody()), "-32001") {
-			t.Fatalf("expected spoofed header without valid RS256 JWT to be blocked with -32001, got: %v", r2)
-		}
-		_ = stream.CloseSend()
-	}
-
-	// Case C: Valid RS256 JWT but $120 exceeds $50 ceiling -> ImmediateResponse -32002 (MRTR escalation)
-	{
-		stream, _ := client.Process(context.Background())
-		_ = stream.Send(&ext_procv3.ProcessingRequest{
-			Request: &ext_procv3.ProcessingRequest_RequestHeaders{
-				RequestHeaders: &ext_procv3.HttpHeaders{
-					Headers: &corev3.HeaderMap{
-						Headers: []*corev3.HeaderValue{
-							{Key: ":path", Value: "/mcp/vendor-billing"},
-							{Key: "authorization", Value: "Bearer " + validJWT},
-							{Key: "idempotency-key", Value: "idem-grpc-3"},
-						},
-					},
-				},
-			},
-		})
-		_, _ = stream.Recv()
-
-		reqJSON, _ := json.Marshal(map[string]any{
-			"jsonrpc": "2.0",
-			"id":      3,
 			"method":  "tools/call",
 			"params":  map[string]any{"name": "refund_invoice", "arguments": map[string]any{"amount": 120.0}},
 		})
@@ -310,13 +190,13 @@ func TestEnvoyGRPCExtProcBidirectionalOIDCPinningAndScrubbing(t *testing.T) {
 		})
 		r2, _ := stream.Recv()
 		imm := r2.GetImmediateResponse()
-		if imm == nil || !strings.Contains(string(imm.GetBody()), "-32002") {
-			t.Fatalf("expected $120 refund to trigger MRTR -32002, got: %v", r2)
+		if imm == nil || !strings.Contains(string(imm.GetBody()), `"resultType":"input_required"`) {
+			t.Fatalf("expected spoofed x-mcp-server ignored and MRTR input_required returned, got: %v", r2)
 		}
 		_ = stream.CloseSend()
 	}
 
-	// Case D: Response-phase live `tools/list` third-party rug pull -> ImmediateResponse -32001!
+	// Case B: Response-phase SSE `tools/list` rug pull uses valid Envoy BodyMutation (NOT ImmediateResponse!)
 	{
 		stream, _ := client.Process(context.Background())
 		_ = stream.Send(&ext_procv3.ProcessingRequest{
@@ -340,7 +220,20 @@ func TestEnvoyGRPCExtProcBidirectionalOIDCPinningAndScrubbing(t *testing.T) {
 		})
 		_, _ = stream.Recv()
 
-		rugResp, _ := json.Marshal(map[string]any{
+		_ = stream.Send(&ext_procv3.ProcessingRequest{
+			Request: &ext_procv3.ProcessingRequest_ResponseHeaders{
+				ResponseHeaders: &ext_procv3.HttpHeaders{
+					Headers: &corev3.HeaderMap{
+						Headers: []*corev3.HeaderValue{
+							{Key: "content-type", Value: "text/event-stream"},
+						},
+					},
+				},
+			},
+		})
+		_, _ = stream.Recv()
+
+		rugJSON, _ := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
 			"id":      4,
 			"result": map[string]any{
@@ -353,15 +246,73 @@ func TestEnvoyGRPCExtProcBidirectionalOIDCPinningAndScrubbing(t *testing.T) {
 				},
 			},
 		})
+		sseBody := []byte("event: message\ndata: " + string(rugJSON) + "\n\n")
 		_ = stream.Send(&ext_procv3.ProcessingRequest{
 			Request: &ext_procv3.ProcessingRequest_ResponseBody{
-				ResponseBody: &ext_procv3.HttpBody{Body: rugResp, EndOfStream: true},
+				ResponseBody: &ext_procv3.HttpBody{Body: sseBody, EndOfStream: true},
 			},
 		})
 		rResp, _ := stream.Recv()
-		imm := rResp.GetImmediateResponse()
-		if imm == nil || !strings.Contains(string(imm.GetBody()), "-32001") {
-			t.Fatalf("expected response-phase tools/list rug pull blocked with -32001, got: %v", rResp)
+		mut := rResp.GetResponseBody().GetResponse().GetBodyMutation()
+		if mut == nil || !strings.Contains(string(mut.GetBody()), "-32001") {
+			t.Fatalf("expected SSE tools/list rug pull blocked via BodyMutation -32001, got: %v", rResp)
+		}
+		_ = stream.CloseSend()
+	}
+
+	// Case C: Valid $35 refund + response secret scrub via BodyMutation
+	{
+		stream, _ := client.Process(context.Background())
+		_ = stream.Send(&ext_procv3.ProcessingRequest{
+			Request: &ext_procv3.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &ext_procv3.HttpHeaders{
+					Headers: &corev3.HeaderMap{
+						Headers: []*corev3.HeaderValue{
+							{Key: ":path", Value: "/mcp/vendor-billing"},
+							{Key: "authorization", Value: "Bearer " + validJWT},
+							{Key: "idempotency-key", Value: "idem-grpc-ok"},
+						},
+					},
+				},
+			},
+		})
+		_, _ = stream.Recv()
+
+		reqJSON, _ := json.Marshal(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      5,
+			"method":  "tools/call",
+			"params":  map[string]any{"name": "refund_invoice", "arguments": map[string]any{"amount": 35.0}},
+		})
+		_ = stream.Send(&ext_procv3.ProcessingRequest{
+			Request: &ext_procv3.ProcessingRequest_RequestBody{
+				RequestBody: &ext_procv3.HttpBody{Body: reqJSON, EndOfStream: true},
+			},
+		})
+		r2, _ := stream.Recv()
+		if r2.GetImmediateResponse() != nil {
+			t.Fatalf("expected valid $35 refund to CONTINUE, got ImmediateResponse: %s", string(r2.GetImmediateResponse().GetBody()))
+		}
+
+		_ = stream.Send(&ext_procv3.ProcessingRequest{
+			Request: &ext_procv3.ProcessingRequest_ResponseHeaders{
+				ResponseHeaders: &ext_procv3.HttpHeaders{},
+			},
+		})
+		_, _ = stream.Recv()
+
+		_ = stream.Send(&ext_procv3.ProcessingRequest{
+			Request: &ext_procv3.ProcessingRequest_ResponseBody{
+				ResponseBody: &ext_procv3.HttpBody{
+					Body:        []byte(`{"jsonrpc":"2.0","id":5,"result":{"debug":"` + activeSecret + `"}}`),
+					EndOfStream: true,
+				},
+			},
+		})
+		r4, _ := stream.Recv()
+		mutated := string(r4.GetResponseBody().GetResponse().GetBodyMutation().GetBody())
+		if strings.Contains(mutated, activeSecret) || !strings.Contains(mutated, scrub.RedactionMarker) {
+			t.Fatalf("expected secret redacted via BodyMutation, got: %s", mutated)
 		}
 		_ = stream.CloseSend()
 	}

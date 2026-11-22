@@ -25,14 +25,24 @@ from typing import Any, Dict, List, Optional
 import urllib.request
 
 from prometheus.iac.lockfile import (
+    DriftAction,
+    DriftKind,
+    ManifestDriftItem,
     build_lockfile_from_servers,
     detect_cross_server_shadowing,
     diff_lockfiles,
     render_diff_markdown,
     verify_tools_list,
 )
+from prometheus.iac.mcp_probe import probe_configured_servers, wrap_stdio_mcp
 from prometheus.iac.scanner import scan_repository, write_init_artifacts
-from prometheus.iac.replay import SignedDecisionLedger, replay_traces
+from prometheus.iac.replay import (
+    SignedDecisionLedger,
+    export_cedar_policies,
+    export_cel_policies,
+    load_otel_or_ledger_records,
+    replay_traces,
+)
 from prometheus.iac.schema import AgentIaCConfig, ManifestLockfile, TrustTier
 
 
@@ -41,6 +51,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
     live_tools: Optional[Dict[str, List[Dict[str, Any]]]] = None
     if args.manifest:
         live_tools = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    elif args.probe:
+        # First pass discovers MCP server URLs/commands from repo configs, then probes them live!
+        pre = scan_repository(repo_root=repo, agent_id=args.agent_id, owner=args.owner)
+        probed, probe_errs = probe_configured_servers(pre.config, timeout=args.probe_timeout)
+        live_tools = probed
+        for srv_name, err in probe_errs.items():
+            print(f"[warn] Live probe failed for MCP server '{srv_name}': {err}", file=sys.stderr)
 
     res = scan_repository(
         repo_root=repo,
@@ -69,11 +86,20 @@ def _cmd_init(args: argparse.Namespace) -> int:
 def _cmd_lock(args: argparse.Namespace) -> int:
     lock_path = Path(args.lockfile)
     config_path = Path(args.config)
-    manifest_data: Dict[str, List[Dict[str, Any]]] = json.loads(
-        Path(args.manifest).read_text(encoding="utf-8")
-    )
-
     config = AgentIaCConfig.load_file(config_path) if config_path.is_file() else None
+
+    if args.manifest:
+        manifest_data: Dict[str, List[Dict[str, Any]]] = json.loads(
+            Path(args.manifest).read_text(encoding="utf-8")
+        )
+    elif args.probe and config is not None:
+        manifest_data, probe_errs = probe_configured_servers(config)
+        for srv_name, err in probe_errs.items():
+            print(f"[warn] Live probe failed for MCP server '{srv_name}': {err}", file=sys.stderr)
+    else:
+        print("Error: provide --manifest <json> or --probe with prometheus.yaml.", file=sys.stderr)
+        return 1
+
     servers_for_lock = {}
     for srv_name, tools in manifest_data.items():
         trust = (
@@ -100,10 +126,23 @@ def _cmd_lock(args: argparse.Namespace) -> int:
     existing_lock = ManifestLockfile.load_file(lock_path)
 
     if args.diff:
-        new_lock, _ = build_lockfile_from_servers(servers_for_lock, allow_poisoned=True)
+        new_lock, poison_findings = build_lockfile_from_servers(servers_for_lock, allow_poisoned=True)
         diff_res = diff_lockfiles(existing_lock, new_lock)
         diff_res.drifts.extend(shadowing)
         diff_res.blocked_count += len(shadowing)
+        # Always block CI on CRITICAL/HIGH Day-1 or rug-pull poisoning even on internal servers
+        for pf in poison_findings:
+            if pf.severity.value in ("critical", "high"):
+                diff_res.drifts.append(
+                    ManifestDriftItem(
+                        server_name=pf.server_name,
+                        tool_name=pf.tool_name,
+                        kind=DriftKind.DAY1_POISONING,
+                        action=DriftAction.BLOCK,
+                        message=f"Poisoning detected ({pf.rule_id}): {pf.message}",
+                    )
+                )
+                diff_res.blocked_count += 1
         diff_res.passed = diff_res.blocked_count == 0
         print(render_diff_markdown(diff_res))
         return 0 if diff_res.passed else 1
@@ -122,10 +161,15 @@ def _cmd_lock(args: argparse.Namespace) -> int:
 
 def _cmd_replay(args: argparse.Namespace) -> int:
     config = AgentIaCConfig.load_file(Path(args.config))
-    signing_key = os.getenv("PROMETHEUS_LEDGER_SIGNING_KEY", "prometheus-ledger-signing-key").encode("utf-8")
-    ledger = SignedDecisionLedger(Path(args.traces), signing_key=signing_key)
-    records = ledger.load_records()
+    records = load_otel_or_ledger_records(Path(args.traces))
     report = replay_traces(config, records, simulate_enforce=args.simulate_enforce)
+
+    if args.export == "cel":
+        print(export_cel_policies(config))
+        return 0
+    if args.export == "cedar":
+        print(export_cedar_policies(config))
+        return 0
 
     if args.json:
         print(report.model_dump_json(indent=2))
@@ -319,6 +363,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
             sidecar_proc.kill()
 
 
+def _cmd_wrap(args: argparse.Namespace) -> int:
+    cmd = list(args.cmd or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        print("Error: provide a STDIO MCP command after `--`, e.g. `prometheus wrap --server fs -- npx @modelcontextprotocol/server-filesystem`", file=sys.stderr)
+        return 2
+
+    config = AgentIaCConfig.load_file(Path(args.config))
+    lockfile = ManifestLockfile.load_file(Path(args.lockfile)) if Path(args.lockfile).is_file() else None
+    signing_key = os.getenv("PROMETHEUS_LEDGER_SIGNING_KEY", "prometheus-ledger-signing-key").encode("utf-8")
+    ledger = SignedDecisionLedger(Path(args.traces), signing_key=signing_key) if args.traces else None
+    return wrap_stdio_mcp(args.server, cmd, config, lockfile, ledger=ledger)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="prometheus",
@@ -331,6 +390,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--agent-id", default=None, help="Explicit agent ID")
     p_init.add_argument("--owner", default="platform-team@example.com", help="Owning team email")
     p_init.add_argument("--manifest", default=None, help="Optional JSON file mapping server_name -> tools/list array")
+    p_init.add_argument("--probe", action="store_true", help="Live-probe discovered HTTP/STDIO MCP servers for tools/list")
+    p_init.add_argument("--probe-timeout", type=float, default=8.0, help="Per-server live probe timeout in seconds")
     p_init.add_argument("--allow-poisoned", action="store_true", help="Include tools even if poisoning lint flags them")
     p_init.set_defaults(func=_cmd_init)
 
@@ -350,8 +411,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run (prefix with --)")
     p_run.set_defaults(func=_cmd_run)
 
+    p_wrap = sub.add_parser("wrap", help="Transparent STDIO MCP wrapper enforcing prometheus.lock & bounds for Cursor/Claude Desktop")
+    p_wrap.add_argument("--server", required=True, help="MCP server name in prometheus.yaml / prometheus.lock")
+    p_wrap.add_argument("--config", default="prometheus.yaml")
+    p_wrap.add_argument("--lockfile", default="prometheus.lock")
+    p_wrap.add_argument("--traces", default=".prometheus/traces.jsonl")
+    p_wrap.add_argument("cmd", nargs=argparse.REMAINDER, help="STDIO MCP server command (prefix with --)")
+    p_wrap.set_defaults(func=_cmd_wrap)
+
     p_lock = sub.add_parser("lock", help="Verify, diff, or update prometheus.lock MCP pins")
-    p_lock.add_argument("--manifest", required=True, help="JSON file mapping server_name -> observed tools/list array")
+    p_lock.add_argument("--manifest", default=None, help="JSON file mapping server_name -> observed tools/list array")
+    p_lock.add_argument("--probe", action="store_true", help="Live-probe MCP servers from prometheus.yaml instead of static JSON")
     p_lock.add_argument("--lockfile", default="prometheus.lock")
     p_lock.add_argument("--config", default="prometheus.yaml")
     p_lock.add_argument("--diff", action="store_true", help="Render PR-ready markdown diff against existing lockfile")
@@ -359,11 +429,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_lock.add_argument("--allow-poisoned", action="store_true")
     p_lock.set_defaults(func=_cmd_lock)
 
-    p_replay = sub.add_parser("replay", help="Replay recorded shadow traces against candidate prometheus.yaml")
+    p_replay = sub.add_parser("replay", help="Replay recorded shadow traces (or OTel logs) against candidate prometheus.yaml")
     p_replay.add_argument("--config", default="prometheus.yaml")
     p_replay.add_argument("--traces", default=".prometheus/traces.jsonl")
     p_replay.add_argument("--simulate-enforce", action="store_true", default=True)
     p_replay.add_argument("--strict", action="store_true", help="Exit non-zero if any calls would be blocked")
+    p_replay.add_argument("--export", choices=["cel", "cedar"], default=None, help="Export calibrated CEL (agentgateway) or Cedar (ToolHive/AgentCore) policies")
     p_replay.add_argument("--json", action="store_true", help="Output JSON report")
     p_replay.set_defaults(func=_cmd_replay)
 

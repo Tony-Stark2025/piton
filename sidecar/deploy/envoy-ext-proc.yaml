@@ -1,13 +1,18 @@
 # Production Envoy Proxy configuration wiring `prometheus-sidecar` as a true
 # bidirectional gRPC `envoy.filters.http.ext_proc` filter (port 50051).
-# Supports request-phase OIDC JWKS RS256/ES256 verification + parameter bounds
-# AND response-phase live `tools/list` manifest pinning + secret scrubbing.
+# Includes message_timeout, fail-closed posture, and gRPC health check.
 static_resources:
   clusters:
     - name: prometheus_ext_proc
       type: STRICT_DNS
       connect_timeout: 0.25s
       lb_policy: ROUND_ROBIN
+      health_checks:
+        - timeout: 1s
+          interval: 5s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          grpc_health_check: {}
       typed_extension_protocol_options:
         envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
           "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
@@ -64,6 +69,8 @@ static_resources:
                       grpc_service:
                         envoy_grpc:
                           cluster_name: prometheus_ext_proc
+                        timeout: 2s
+                      message_timeout: 2s
                       failure_mode_allow: false
                       processing_mode:
                         request_header_mode: SEND

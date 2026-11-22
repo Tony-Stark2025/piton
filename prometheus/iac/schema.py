@@ -4,8 +4,8 @@ Declarative Agent IaC (`prometheus.yaml`) and Split-Hash MCP Manifest Lockfile (
 Design guarantees:
 - Human intent & parameter-bounded policies live in `prometheus.yaml` (committed to git).
 - Machine-managed SHA-256 hashes live in `prometheus.lock` (eliminating YAML merge conflicts).
-- Production identity defaults to OIDC/OBO delegation (`oidc_obo`) with stateless W3C `traceparent`
-  correlation (MCP 2026-07-28 compatible); static env keys are strictly isolated to `local_dev_credentials`.
+- Production identity defaults to fail-closed OIDC/OBO delegation (`oidc_obo`) with RS256/ES256
+  JWKS verification and stateless W3C `traceparent` correlation (MCP 2026-07-28 compatible).
 """
 
 from enum import Enum
@@ -16,6 +16,22 @@ import time
 from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field
+
+
+def normalize_json_numbers(obj: Any) -> Any:
+    """
+    Normalizes whole-number floats (`50.0` -> `50`, `0.0` -> `0`) across nested JSON structures
+    so Python Pydantic serialization matches Go `encoding/json` bit-for-bit.
+    """
+    if isinstance(obj, bool) or obj is None:
+        return obj
+    if isinstance(obj, float) and obj.is_integer():
+        return int(obj)
+    if isinstance(obj, dict):
+        return {k: normalize_json_numbers(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [normalize_json_numbers(v) for v in obj]
+    return obj
 
 
 class EnforcementMode(str, Enum):
@@ -57,8 +73,12 @@ class IdentityConfig(BaseModel):
     jwks_url: Optional[str] = Field(default=None, description="Explicit JWKS URL (auto-discovered from issuer if omitted)")
     audience: Optional[str] = Field(default=None, description="Expected JWT aud claim")
     verify_jwt_signature: bool = Field(
+        default=True,
+        description="Cryptographically verify RS256/ES256 JWTs via JWKS whenever issuer or jwks_url is configured",
+    )
+    allow_trusted_headers: bool = Field(
         default=False,
-        description="When true (or when jwks_url/issuer is set with enforce), cryptographically verify RS256/ES256 JWTs via JWKS",
+        description="Explicit opt-in for trusting upstream IdP-injected X-OBO-Principal headers inside an authenticated mesh",
     )
     require_delegated_sub: bool = Field(
         default=True,
@@ -87,6 +107,7 @@ class LocalDevCredentialSlot(BaseModel):
 
 class ParameterBound(BaseModel):
     """Deterministic argument-level constraint (Progent/Cedar-style bounded autonomy)."""
+    required: bool = Field(default=True, description="Fail closed if this bounded parameter is omitted")
     min: Optional[float] = None
     max: Optional[float] = None
     enum: Optional[List[Any]] = None
@@ -98,6 +119,17 @@ class ParameterBound(BaseModel):
 
 class RateLimitPolicy(BaseModel):
     max_calls_per_trace: Optional[int] = Field(default=None, ge=1)
+    max_calls_per_hour: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Rolling 1h per-principal call ceiling (stops cross-trace smurfing)",
+    )
+    max_sum_per_hour: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Rolling 1h cumulative numeric ceiling keyed on verified OBO principal",
+    )
+    sum_parameter: str = Field(default="amount", description="Argument field summed for max_sum_per_hour")
 
 
 class ToolPolicy(BaseModel):
@@ -116,6 +148,10 @@ class MCPServerPolicy(BaseModel):
     command: Optional[str] = Field(default=None, description="STDIO command if discovered locally")
     args: List[str] = Field(default_factory=list)
     trust_tier: TrustTier = Field(default=TrustTier.THIRD_PARTY)
+    strict_unknown_tools: bool = Field(
+        default=True,
+        description="Fail closed on unlisted tools for this server in enforce mode",
+    )
     tools: Dict[str, ToolPolicy] = Field(default_factory=dict)
 
 
@@ -128,7 +164,7 @@ class AgentIaCConfig(BaseModel):
     mcp_servers: Dict[str, MCPServerPolicy] = Field(default_factory=dict)
 
     def canonical_sha256(self) -> str:
-        payload = self.model_dump(mode="json")
+        payload = normalize_json_numbers(self.model_dump(mode="json", exclude_none=True))
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
@@ -184,13 +220,15 @@ class ManifestLockfile(BaseModel):
 
     def canonical_sha256(self) -> str:
         # Exclude timestamp so identical pin sets yield identical compliance ledger hashes
-        payload = {
-            "version": self.version,
-            "servers": {
-                srv_name: srv.model_dump(mode="json")
-                for srv_name, srv in sorted(self.servers.items())
-            },
-        }
+        payload = normalize_json_numbers(
+            {
+                "version": self.version,
+                "servers": {
+                    srv_name: srv.model_dump(mode="json", exclude_none=True)
+                    for srv_name, srv in sorted(self.servers.items())
+                },
+            }
+        )
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
@@ -199,7 +237,11 @@ class ManifestLockfile(BaseModel):
 
     @classmethod
     def from_json(cls, raw_json: str) -> "ManifestLockfile":
-        return cls.model_validate(json.loads(raw_json))
+        return cls.from_dict(json.loads(raw_json))
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "ManifestLockfile":
+        return cls.model_validate(data)
 
     @classmethod
     def load_file(cls, path: Path) -> "ManifestLockfile":

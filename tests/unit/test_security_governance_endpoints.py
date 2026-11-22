@@ -32,13 +32,14 @@ async def test_security_overview_endpoint(test_client):
 
 @pytest.mark.asyncio
 async def test_proxy_mint_token_and_permit_endpoints(test_client):
-    # 1. Mint capability token via REST
+    from prometheus.main import mcp_server
+
+    # 1. Mint capability token via REST (scoped to explicit resource and caller's authenticated tenant)
     mint_payload = {
         "subject": "agent-worker-01",
         "allowed_methods": ["GET", "PUT"],
         "allowed_resource_ids": ["res-999"],
         "ttl_seconds": 60,
-        "tenant_id": "org-corp",
     }
     res_token = await test_client.post("/api/v1/proxy/mint-token", json=mint_payload)
     assert res_token.status_code == 200
@@ -46,6 +47,15 @@ async def test_proxy_mint_token_and_permit_endpoints(test_client):
     assert token_data["subject"] == "agent-worker-01"
     assert "signature" in token_data
     assert token_data["scope"]["allowed_methods"] == ["GET", "PUT"]
+
+    # Seed pre-state witness for res-999 under the minted token's tenant (required by hardened permit minting)
+    effective_tenant = token_data["scope"]["tenant_id"]
+    mcp_server.hypervisor.registry.register_state(
+        "res-999",
+        {"status": "draft"},
+        "GET /api/v1/res/res-999",
+        tenant_id=effective_tenant,
+    )
 
     # 2. Request action permit
     permit_payload = {
@@ -64,13 +74,14 @@ async def test_proxy_mint_token_and_permit_endpoints(test_client):
 
 @pytest.mark.asyncio
 async def test_proxy_execute_tool_interception(test_client):
-    # Mint token with read-only permission
+    # Mint token with read-only permission scoped to inv-001 (wildcards require admin clearance)
     res_token = await test_client.post("/api/v1/proxy/mint-token", json={
         "subject": "reader-agent",
         "allowed_methods": ["GET"],
-        "allowed_resource_ids": ["*"],
+        "allowed_resource_ids": ["inv-001"],
         "ttl_seconds": 60,
     })
+    assert res_token.status_code == 200
     token_data = res_token.json()
 
     # Attempt to execute PUT (mutation) -> should be denied by capability authority
@@ -106,6 +117,8 @@ async def test_proxy_execute_tool_interception(test_client):
 
 @pytest.mark.asyncio
 async def test_mcp_security_tools_integration(test_client):
+    from prometheus.main import mcp_server
+
     # 1. Test tools/list exposes new security tools
     list_res = await test_client.post("/mcp/sse", json={
         "jsonrpc": "2.0",
@@ -121,17 +134,24 @@ async def test_mcp_security_tools_integration(test_client):
     assert "request_action_permit" in tool_names
     assert "verify_action_permit" in tool_names
 
-    # 2. Call mint_capability_token via MCP
+    # 2. Call mint_capability_token via MCP with valid capability token (fail-closed hypervisor)
+    caller_token = mcp_server.hypervisor.token_authority.mint_token(
+        subject="mcp-caller",
+        allowed_methods=["mint_capability_token"],
+        allowed_resource_ids=["*"],
+        ttl_seconds=60,
+    )
     mint_res = await test_client.post("/mcp/sse", json={
         "jsonrpc": "2.0",
         "id": 101,
         "method": "tools/call",
+        "token": caller_token.model_dump(),
         "params": {
             "name": "mint_capability_token",
             "arguments": {
                 "subject": "mcp-agent-77",
                 "allowed_methods": ["GET", "approve_action"],
-                "allowed_resources": ["*"],
+                "allowed_resources": ["inv-1"],
                 "ttl_seconds": 45,
             },
         },

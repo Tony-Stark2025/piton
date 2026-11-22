@@ -58,7 +58,7 @@ router.get("/api/v1/invoices/:id", async (req, res) => {
     patched, modified = TypeScriptPatchSynthesizer.synthesize_bola_patch(code, proof, "invoices.ts")
     assert modified is True
     # Verify fail-closed check for missing/undefined user tenant
-    assert "!(req.user?.tenantId || req.user?.tenant_id)" in patched
+    assert "!(req.user?.tenantId || req.user?.tenant_id || req.user?.orgId)" in patched
 
 
 def test_sec_05_ts_bfla_targets_exact_route_keyword():

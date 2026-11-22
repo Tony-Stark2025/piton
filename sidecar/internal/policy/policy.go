@@ -8,20 +8,32 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/oidc"
 )
 
-// Policy structures mirror `prometheus/iac/schema.py` 1:1 so compiled runtime_policy.json
-// and prometheus.lock evaluate identically across Python CLI and Go hot path.
+const (
+	maxTrackedTraces    = 100_000
+	maxTrackedIdemKeys  = 200_000
+	traceEntryTTL       = 15 * time.Minute
+	idemEntryTTL        = 24 * time.Hour
+	rollingWindowDur    = time.Hour
+	mrtrStateTTL        = 10 * time.Minute
+)
+
+// Policy structures mirror `prometheus/iac/schema.py` 1:1.
 
 type AgentMeta struct {
 	ID    string `json:"id"`
@@ -35,6 +47,7 @@ type IdentityConfig struct {
 	JWKSURL             string `json:"jwks_url,omitempty"`
 	Audience            string `json:"audience,omitempty"`
 	VerifyJWTSignature  bool   `json:"verify_jwt_signature"`
+	AllowTrustedHeaders bool   `json:"allow_trusted_headers"`
 	RequireDelegatedSub bool   `json:"require_delegated_sub"`
 	CorrelateHeader     string `json:"correlate_header"`
 }
@@ -51,6 +64,7 @@ type LocalDevCredentialSlot struct {
 }
 
 type ParameterBound struct {
+	Required     *bool    `json:"required,omitempty"`
 	Min          *float64 `json:"min,omitempty"`
 	Max          *float64 `json:"max,omitempty"`
 	Enum         []any    `json:"enum,omitempty"`
@@ -60,8 +74,18 @@ type ParameterBound struct {
 	MaxLength    *int     `json:"max_length,omitempty"`
 }
 
+func (b ParameterBound) IsRequired() bool {
+	if b.Required == nil {
+		return true
+	}
+	return *b.Required
+}
+
 type RateLimitPolicy struct {
-	MaxCallsPerTrace *int `json:"max_calls_per_trace,omitempty"`
+	MaxCallsPerTrace *int     `json:"max_calls_per_trace,omitempty"`
+	MaxCallsPerHour  *int     `json:"max_calls_per_hour,omitempty"`
+	MaxSumPerHour    *float64 `json:"max_sum_per_hour,omitempty"`
+	SumParameter     string   `json:"sum_parameter,omitempty"`
 }
 
 type ToolPolicy struct {
@@ -73,11 +97,19 @@ type ToolPolicy struct {
 }
 
 type MCPServerPolicy struct {
-	URL       string                `json:"url,omitempty"`
-	Command   string                `json:"command,omitempty"`
-	Args      []string              `json:"args,omitempty"`
-	TrustTier string                `json:"trust_tier"` // "internal" | "third_party"
-	Tools     map[string]ToolPolicy `json:"tools,omitempty"`
+	URL                string                `json:"url,omitempty"`
+	Command            string                `json:"command,omitempty"`
+	Args               []string              `json:"args,omitempty"`
+	TrustTier          string                `json:"trust_tier"` // "internal" | "third_party"
+	StrictUnknownTools *bool                 `json:"strict_unknown_tools,omitempty"`
+	Tools              map[string]ToolPolicy `json:"tools,omitempty"`
+}
+
+func (m MCPServerPolicy) IsStrictUnknownTools() bool {
+	if m.StrictUnknownTools == nil {
+		return true
+	}
+	return *m.StrictUnknownTools
 }
 
 type AgentIaCConfig struct {
@@ -143,32 +175,64 @@ type DecisionLedgerRecord struct {
 	RecordHMAC         string          `json:"record_hmac"`
 }
 
+type traceCounter struct {
+	Count     int
+	UpdatedAt time.Time
+}
+
+type rollingSample struct {
+	At    time.Time
+	Value float64
+}
+
+// Metrics counters exposed via Prometheus `/metrics`.
+type Metrics struct {
+	RequestsTotal     atomic.Int64
+	AllowedTotal      atomic.Int64
+	ShadowDeniedTotal atomic.Int64
+	DeniedTotal       atomic.Int64
+	MRTREscalated     atomic.Int64
+	RugPullsBlocked   atomic.Int64
+	SecretsRedacted   atomic.Int64
+}
+
 // Engine executes sub-millisecond parameter-bound evaluation, split-hash MCP pinning,
-// OIDC/OBO principal extraction, and HMAC-chained ledger recording.
+// cryptographic OIDC/OBO principal resolution, rolling principal budgets, MCP MRTR
+// signed requestState minting/verification, and HMAC-chained ledger recording.
 type Engine struct {
 	Config         AgentIaCConfig
 	Lockfile       *ManifestLockfile
 	PolicySHA256   string
 	LockfileSHA256 string
 	OIDCVerifier   *oidc.Verifier
+	Metrics        Metrics
 
-	ledgerPath    string
-	signingKey    []byte
-	tokenizerKey  []byte
-	mu            sync.Mutex
-	traceCounts   map[string]int
-	seenIdemKeys  map[string]struct{}
-	lastRecordMac string
+	ledgerPath       string
+	signingKey       []byte
+	tokenizerKey     []byte
+	mu               sync.Mutex
+	ledgerMu         sync.Mutex
+	traceCounts      map[string]traceCounter
+	seenIdemKeys     map[string]time.Time
+	principalRolling map[string][]rollingSample
+	lastRecordMac    string
 }
 
 func NewEngine(cfg AgentIaCConfig, lock *ManifestLockfile, ledgerPath string, signingKey, tokenizerKey []byte) (*Engine, error) {
+	// Require explicit signing key in enforce mode when ledger recording is active
 	if len(signingKey) == 0 {
+		if cfg.Agent.Mode == "enforce" && ledgerPath != "" {
+			return nil, errors.New("PROMETHEUS_LEDGER_SIGNING_KEY must be set in enforce mode (refusing hardcoded fallback)")
+		}
 		signingKey = []byte("prometheus-ledger-signing-key")
 	}
 	if len(tokenizerKey) == 0 {
 		tokenizerKey = []byte("prometheus-default-tokenizer-key")
 	}
-	policyBytes, err := canonicalJSON(cfg)
+
+	// Normalize policy via generic map so canonical_sha256 matches Python sorted-keys JSON
+	policyMap := structToMapNoNulls(cfg)
+	policyBytes, err := canonicalJSON(policyMap)
 	if err != nil {
 		return nil, err
 	}
@@ -176,11 +240,11 @@ func NewEngine(cfg AgentIaCConfig, lock *ManifestLockfile, ledgerPath string, si
 
 	lockSHA := "NONE"
 	if lock != nil {
-		lockPayload := map[string]any{
+		lockMap := structToMapNoNulls(map[string]any{
 			"version": lock.Version,
 			"servers": lock.Servers,
-		}
-		lb, err := canonicalJSON(lockPayload)
+		})
+		lb, err := canonicalJSON(lockMap)
 		if err != nil {
 			return nil, err
 		}
@@ -188,30 +252,33 @@ func NewEngine(cfg AgentIaCConfig, lock *ManifestLockfile, ledgerPath string, si
 		lockSHA = hex.EncodeToString(ls[:])
 	}
 
+	// Auto-enable cryptographic OIDC JWKS verification whenever Issuer or JWKSURL is set
 	var verifier *oidc.Verifier
-	if cfg.Identity.VerifyJWTSignature || cfg.Identity.JWKSURL != "" {
-		verifier = oidc.NewVerifier(oidc.VerifierConfig{
-			Issuer:   cfg.Identity.Issuer,
-			JWKSURL:  cfg.Identity.JWKSURL,
-			Audience: cfg.Identity.Audience,
-		})
+	if cfg.Identity.Issuer != "" || cfg.Identity.JWKSURL != "" || cfg.Identity.VerifyJWTSignature {
+		if cfg.Identity.Issuer != "" || cfg.Identity.JWKSURL != "" {
+			verifier = oidc.NewVerifier(oidc.VerifierConfig{
+				Issuer:   cfg.Identity.Issuer,
+				JWKSURL:  cfg.Identity.JWKSURL,
+				Audience: cfg.Identity.Audience,
+			})
+		}
 	}
 
 	eng := &Engine{
-		Config:         cfg,
-		Lockfile:       lock,
-		PolicySHA256:   hex.EncodeToString(policySum[:]),
-		LockfileSHA256: lockSHA,
-		OIDCVerifier:   verifier,
-		ledgerPath:     ledgerPath,
-		signingKey:     signingKey,
-		tokenizerKey:   tokenizerKey,
-		traceCounts:    make(map[string]int),
-		seenIdemKeys:   make(map[string]struct{}),
-		lastRecordMac:  "GENESIS",
+		Config:           cfg,
+		Lockfile:         lock,
+		PolicySHA256:     hex.EncodeToString(policySum[:]),
+		LockfileSHA256:   lockSHA,
+		OIDCVerifier:     verifier,
+		ledgerPath:       ledgerPath,
+		signingKey:       signingKey,
+		tokenizerKey:     tokenizerKey,
+		traceCounts:      make(map[string]traceCounter),
+		seenIdemKeys:     make(map[string]time.Time),
+		principalRolling: make(map[string][]rollingSample),
+		lastRecordMac:    "GENESIS",
 	}
 
-	// Resume chain if ledger file already exists
 	if ledgerPath != "" {
 		if raw, err := os.ReadFile(ledgerPath); err == nil {
 			lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
@@ -261,10 +328,11 @@ func LoadLockfile(path string) (*ManifestLockfile, error) {
 	return &lock, nil
 }
 
-// ResolveOBOPrincipal resolves the caller's OBO identity.
-// When cryptographic OIDC/JWKS verification is enabled (`VerifyJWTSignature` or `JWKSURL` set),
-// it strictly verifies the Bearer JWT via RS256/ES256 JWKS and fails closed on missing/forged tokens
-// (never trusting spoofable `X-OBO-Principal` headers).
+// ResolveOBOPrincipal resolves caller identity fail-closed:
+//   - If OIDCVerifier is active (issuer/jwks_url set): strictly verifies RS256/ES256 Bearer JWT;
+//     never trusts X-OBO-Principal headers.
+//   - If no OIDCVerifier is configured: only trusts X-OBO-Principal/X-Forwarded-User when
+//     `allow_trusted_headers: true` OR in `shadow` mode (fails closed in `enforce`!).
 func (e *Engine) ResolveOBOPrincipal(ctx context.Context, hdr http.Header) string {
 	if e.OIDCVerifier != nil {
 		auth := strings.TrimSpace(hdr.Get("Authorization"))
@@ -278,40 +346,15 @@ func (e *Engine) ResolveOBOPrincipal(ctx context.Context, hdr http.Header) strin
 		}
 		return principal.CanonicalID
 	}
-	return ExtractOBOPrincipal(hdr)
+	if e.Config.Identity.AllowTrustedHeaders || e.Config.Agent.Mode == "shadow" {
+		return ExtractOBOPrincipal(hdr)
+	}
+	return ""
 }
 
-// ExtractOBOPrincipal extracts user+agent principal from trusted upstream IdP gateway headers
-// (X-OBO-Principal / X-Forwarded-User) or an OAuth2 Bearer JWT when signature verification is delegated upstream.
 func ExtractOBOPrincipal(hdr http.Header) string {
 	if v := strings.TrimSpace(hdr.Get("X-OBO-Principal")); v != "" {
 		return v
-	}
-	auth := strings.TrimSpace(hdr.Get("Authorization"))
-	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		tok := strings.TrimSpace(auth[7:])
-		parts := strings.Split(tok, ".")
-		if len(parts) == 3 {
-			if payload, err := base64.RawURLEncoding.DecodeString(parts[1]); err == nil {
-				var claims map[string]any
-				if json.Unmarshal(payload, &claims) == nil {
-					if expVal, ok := claims["exp"].(float64); ok {
-						if time.Now().Unix() > int64(expVal) {
-							return ""
-						}
-					}
-					sub, _ := claims["sub"].(string)
-					if sub != "" {
-						if act, ok := claims["act"].(map[string]any); ok {
-							if actSub, _ := act["sub"].(string); actSub != "" {
-								return fmt.Sprintf("user:%s|agent:%s", sub, actSub)
-							}
-						}
-						return "user:" + sub
-					}
-				}
-			}
-		}
 	}
 	if v := strings.TrimSpace(hdr.Get("X-Forwarded-User")); v != "" {
 		return "user:" + v
@@ -319,8 +362,114 @@ func ExtractOBOPrincipal(hdr http.Header) string {
 	return ""
 }
 
-// EvaluateToolCall deterministically enforces OBO principal, idempotency, per-trace rate limits,
-// and parameter bounds in O(1) sub-millisecond time.
+// ============================================================================
+// MCP 2026-07-28 MRTR Signed RequestState & Approval Token Verification
+// ============================================================================
+
+type MRTRStatePayload struct {
+	ServerName string `json:"server_name"`
+	ToolName   string `json:"tool_name"`
+	ArgsHash   string `json:"args_hash"`
+	Principal  string `json:"principal"`
+	ExpiresAt  int64  `json:"expires_at"`
+	Approved   bool   `json:"approved"`
+}
+
+func (e *Engine) MintMRTRState(serverName, toolName string, args map[string]any, principal string, approved bool) string {
+	ab, _ := canonicalJSON(args)
+	ah := sha256.Sum256(ab)
+	st := MRTRStatePayload{
+		ServerName: serverName,
+		ToolName:   toolName,
+		ArgsHash:   hex.EncodeToString(ah[:]),
+		Principal:  principal,
+		ExpiresAt:  time.Now().Add(mrtrStateTTL).Unix(),
+		Approved:   approved,
+	}
+	raw, _ := canonicalJSON(st)
+	mac := e.hmacHex(e.signingKey, string(raw), 32)
+	return base64.RawURLEncoding.EncodeToString(raw) + "." + mac
+}
+
+func (e *Engine) VerifyMRTRApprovalToken(token, serverName, toolName string, args map[string]any, principal string) bool {
+	parts := strings.Split(strings.TrimSpace(token), ".")
+	if len(parts) != 2 {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false
+	}
+	expectedMac := e.hmacHex(e.signingKey, string(raw), 32)
+	if !hmac.Equal([]byte(parts[1]), []byte(expectedMac)) {
+		return false
+	}
+	var st MRTRStatePayload
+	if json.Unmarshal(raw, &st) != nil {
+		return false
+	}
+	if !st.Approved || time.Now().Unix() > st.ExpiresAt {
+		return false
+	}
+	ab, _ := canonicalJSON(args)
+	ah := sha256.Sum256(ab)
+	return st.ServerName == serverName &&
+		st.ToolName == toolName &&
+		st.ArgsHash == hex.EncodeToString(ah[:]) &&
+		st.Principal == principal
+}
+
+// BuildMRTRInputRequiredPayload constructs a spec-compliant MCP 2026-07-28 MRTR
+// `input_required` result envelope with signed `requestState` for out-of-band approval.
+func (e *Engine) BuildMRTRInputRequiredPayload(reqID any, serverName, toolName string, args map[string]any, principal string, ev EvaluationResult) map[string]any {
+	stateToken := e.MintMRTRState(serverName, toolName, args, principal, false)
+	return map[string]any{
+		"jsonrpc": "2.0",
+		"id":      reqID,
+		"result": map[string]any{
+			"resultType":   "input_required",
+			"requestState": stateToken,
+			"inputRequests": []map[string]any{
+				{
+					"id":     "prometheus-mrtr-approval",
+					"method": "elicitation/create",
+					"params": map[string]any{
+						"message": fmt.Sprintf("Out-of-band approval required for %s.%s (exceeds autonomous parameter bounds).", serverName, toolName),
+						"requestedSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"approval_token": map[string]any{"type": "string", "description": "Signed Prometheus MRTR approval token"},
+							},
+							"required": []string{"approval_token"},
+						},
+					},
+				},
+			},
+			"prometheus": ev,
+		},
+	}
+}
+
+func (e *Engine) pruneCachesLocked(now time.Time) {
+	if len(e.traceCounts) > maxTrackedTraces {
+		for k, v := range e.traceCounts {
+			if now.Sub(v.UpdatedAt) > traceEntryTTL || len(e.traceCounts) > maxTrackedTraces {
+				delete(e.traceCounts, k)
+			}
+		}
+	}
+	if len(e.seenIdemKeys) > maxTrackedIdemKeys {
+		for k, ts := range e.seenIdemKeys {
+			if now.Sub(ts) > idemEntryTTL || len(e.seenIdemKeys) > maxTrackedIdemKeys {
+				delete(e.seenIdemKeys, k)
+			}
+		}
+	}
+}
+
+// EvaluateToolCall deterministically enforces OBO principal, fail-closed server/tool allowlists,
+// idempotency (committed ONLY on allowed calls), bounded per-trace & rolling 1h per-principal
+// budgets, and type-safe parameter bounds.
 func (e *Engine) EvaluateToolCall(
 	traceparent string,
 	serverName string,
@@ -328,8 +477,11 @@ func (e *Engine) EvaluateToolCall(
 	arguments map[string]any,
 	oboPrincipal string,
 	idempotencyKey string,
+	mrtrApprovalToken ...string,
 ) EvaluationResult {
+	e.Metrics.RequestsTotal.Add(1)
 	var violations []RuleViolation
+	now := time.Now()
 
 	// 1. OIDC/OBO delegated principal requirement
 	if e.Config.Identity.Mode == "oidc_obo" && e.Config.Identity.RequireDelegatedSub && oboPrincipal == "" {
@@ -343,17 +495,31 @@ func (e *Engine) EvaluateToolCall(
 	srvPolicy, hasSrv := e.Config.MCPServers[serverName]
 	var toolPolicy ToolPolicy
 	var hasTool bool
-	if hasSrv {
+	if !hasSrv {
+		violations = append(violations, RuleViolation{
+			RuleID:            "UNKNOWN_MCP_SERVER",
+			Message:           fmt.Sprintf("MCP server '%s' is not declared in prometheus.yaml.", serverName),
+			RecommendedAction: "block",
+		})
+	} else {
 		toolPolicy, hasTool = srvPolicy.Tools[toolName]
+		if !hasTool && srvPolicy.IsStrictUnknownTools() {
+			violations = append(violations, RuleViolation{
+				RuleID:            "UNLISTED_MCP_TOOL",
+				Message:           fmt.Sprintf("Tool '%s.%s' is not declared in prometheus.yaml.", serverName, toolName),
+				RecommendedAction: "block",
+			})
+		}
 	}
 
+	var idemScoped string
 	if hasTool {
 		onExceed := toolPolicy.OnBoundExceeded
 		if onExceed == "" {
 			onExceed = "mrtr_escalate"
 		}
 
-		// 2. Single-use idempotency check
+		// 2. Check idempotency key (committed ONLY if call is ultimately admitted!)
 		if toolPolicy.IdempotencyKey == "required" {
 			if idempotencyKey == "" {
 				violations = append(violations, RuleViolation{
@@ -362,47 +528,106 @@ func (e *Engine) EvaluateToolCall(
 					RecommendedAction: "block",
 				})
 			} else {
+				idemScoped = serverName + "::" + toolName + "::" + idempotencyKey
 				e.mu.Lock()
-				idemScoped := serverName + "::" + toolName + "::" + idempotencyKey
-				if _, exists := e.seenIdemKeys[idemScoped]; exists {
+				if ts, exists := e.seenIdemKeys[idemScoped]; exists && now.Sub(ts) <= idemEntryTTL {
 					violations = append(violations, RuleViolation{
 						RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
 						Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
 						ObservedValue:     idempotencyKey,
 						RecommendedAction: "block",
 					})
-				} else if e.Config.Agent.Mode == "enforce" {
-					e.seenIdemKeys[idemScoped] = struct{}{}
 				}
 				e.mu.Unlock()
 			}
 		}
 
-		// 3. Per-trace call quota
-		if toolPolicy.RateLimit != nil && toolPolicy.RateLimit.MaxCallsPerTrace != nil {
+		// 3. Per-trace & rolling 1h per-principal cumulative budgets (kills cross-trace smurfing)
+		if toolPolicy.RateLimit != nil {
 			e.mu.Lock()
-			ck := traceparent + "::" + serverName + "::" + toolName
-			e.traceCounts[ck]++
-			count := e.traceCounts[ck]
-			e.mu.Unlock()
-			if count > *toolPolicy.RateLimit.MaxCallsPerTrace {
-				violations = append(violations, RuleViolation{
-					RuleID:            "TRACE_RATE_LIMIT_EXCEEDED",
-					Message:           fmt.Sprintf("Call #%d to '%s.%s' exceeds max_calls_per_trace=%d.", count, serverName, toolName, *toolPolicy.RateLimit.MaxCallsPerTrace),
-					ObservedValue:     count,
-					ConfiguredBound:   *toolPolicy.RateLimit.MaxCallsPerTrace,
-					RecommendedAction: onExceed,
-				})
+			e.pruneCachesLocked(now)
+			if toolPolicy.RateLimit.MaxCallsPerTrace != nil {
+				ck := traceparent + "::" + serverName + "::" + toolName
+				cur := e.traceCounts[ck]
+				if now.Sub(cur.UpdatedAt) > traceEntryTTL {
+					cur.Count = 0
+				}
+				cur.Count++
+				cur.UpdatedAt = now
+				e.traceCounts[ck] = cur
+				if cur.Count > *toolPolicy.RateLimit.MaxCallsPerTrace {
+					violations = append(violations, RuleViolation{
+						RuleID:            "TRACE_RATE_LIMIT_EXCEEDED",
+						Message:           fmt.Sprintf("Call #%d to '%s.%s' exceeds max_calls_per_trace=%d.", cur.Count, serverName, toolName, *toolPolicy.RateLimit.MaxCallsPerTrace),
+						ObservedValue:     cur.Count,
+						ConfiguredBound:   *toolPolicy.RateLimit.MaxCallsPerTrace,
+						RecommendedAction: onExceed,
+					})
+				}
 			}
+
+			if toolPolicy.RateLimit.MaxCallsPerHour != nil || toolPolicy.RateLimit.MaxSumPerHour != nil {
+				pkey := oboPrincipal + "::" + e.Config.Agent.ID + "::" + serverName + "::" + toolName
+				samples := e.principalRolling[pkey]
+				cutoff := now.Add(-rollingWindowDur)
+				kept := samples[:0]
+				var sum float64
+				for _, s := range samples {
+					if s.At.After(cutoff) {
+						kept = append(kept, s)
+						sum += s.Value
+					}
+				}
+				sumParam := toolPolicy.RateLimit.SumParameter
+				if sumParam == "" {
+					sumParam = "amount"
+				}
+				valNum, _ := toFloat64(arguments[sumParam])
+				nextCalls := len(kept) + 1
+				nextSum := sum + valNum
+				if toolPolicy.RateLimit.MaxCallsPerHour != nil && nextCalls > *toolPolicy.RateLimit.MaxCallsPerHour {
+					violations = append(violations, RuleViolation{
+						RuleID:            "PRINCIPAL_HOURLY_CALLS_EXCEEDED",
+						Message:           fmt.Sprintf("Hourly call #%d for principal exceeds max_calls_per_hour=%d.", nextCalls, *toolPolicy.RateLimit.MaxCallsPerHour),
+						ObservedValue:     nextCalls,
+						ConfiguredBound:   *toolPolicy.RateLimit.MaxCallsPerHour,
+						RecommendedAction: onExceed,
+					})
+				}
+				if toolPolicy.RateLimit.MaxSumPerHour != nil && nextSum > *toolPolicy.RateLimit.MaxSumPerHour {
+					violations = append(violations, RuleViolation{
+						RuleID:            "PRINCIPAL_HOURLY_SUM_EXCEEDED",
+						Parameter:         &sumParam,
+						Message:           fmt.Sprintf("Cumulative 1h %s=%.2f exceeds max_sum_per_hour=%.2f.", sumParam, nextSum, *toolPolicy.RateLimit.MaxSumPerHour),
+						ObservedValue:     nextSum,
+						ConfiguredBound:   *toolPolicy.RateLimit.MaxSumPerHour,
+						RecommendedAction: onExceed,
+					})
+				}
+				if len(violations) == 0 {
+					kept = append(kept, rollingSample{At: now, Value: valNum})
+				}
+				e.principalRolling[pkey] = kept
+			}
+			e.mu.Unlock()
 		}
 
-		// 4. Parameter bounds
+		// 4. Parameter bounds (fail closed on omitted required bounded params)
 		for pname, bound := range toolPolicy.ParameterBounds {
-			val, present := arguments[pname]
+			p := pname
+			val, present := arguments[p]
 			if !present {
+				if bound.IsRequired() {
+					violations = append(violations, RuleViolation{
+						RuleID:            "MISSING_BOUNDED_PARAMETER",
+						Parameter:         &p,
+						Message:           fmt.Sprintf("Required bounded parameter '%s' was omitted.", p),
+						RecommendedAction: "block",
+					})
+				}
 				continue
 			}
-			violations = append(violations, checkParamBound(pname, val, bound, onExceed)...)
+			violations = append(violations, checkParamBound(p, val, bound, onExceed)...)
 		}
 	}
 
@@ -424,6 +649,34 @@ func (e *Engine) EvaluateToolCall(
 		}
 	}
 
+	// If MRTR escalation occurred AND caller supplied a cryptographically signed MRTR approval token
+	// matching this exact server/tool/arguments/principal, honor the human approval!
+	if verdict == "mrtr_escalate" && len(mrtrApprovalToken) > 0 && mrtrApprovalToken[0] != "" {
+		if e.VerifyMRTRApprovalToken(mrtrApprovalToken[0], serverName, toolName, arguments, oboPrincipal) {
+			verdict = "allow"
+			violations = []RuleViolation{}
+		}
+	}
+
+	// Commit idempotency key ONLY if call is admitted in enforce mode (never burn key on rejected calls)
+	if verdict == "allow" && idemScoped != "" && e.Config.Agent.Mode == "enforce" {
+		e.mu.Lock()
+		e.pruneCachesLocked(now)
+		e.seenIdemKeys[idemScoped] = now
+		e.mu.Unlock()
+	}
+
+	switch verdict {
+	case "allow":
+		e.Metrics.AllowedTotal.Add(1)
+	case "shadow_deny":
+		e.Metrics.ShadowDeniedTotal.Add(1)
+	case "mrtr_escalate":
+		e.Metrics.MRTREscalated.Add(1)
+	case "deny":
+		e.Metrics.DeniedTotal.Add(1)
+	}
+
 	if violations == nil {
 		violations = []RuleViolation{}
 	}
@@ -433,6 +686,32 @@ func (e *Engine) EvaluateToolCall(
 		ServerName: serverName,
 		ToolName:   toolName,
 	}
+}
+
+func strictEnumMatch(val any, allowed []any) bool {
+	for _, item := range allowed {
+		// Prevent bool <-> int/string confusion
+		_, vBool := val.(bool)
+		_, iBool := item.(bool)
+		if vBool || iBool {
+			if vBool && iBool && val == item {
+				return true
+			}
+			continue
+		}
+		if vf, ok1 := toFloat64(val); ok1 {
+			if inf, ok2 := toFloat64(item); ok2 {
+				if vf == inf {
+					return true
+				}
+				continue
+			}
+		}
+		if reflect.TypeOf(val) == reflect.TypeOf(item) && reflect.DeepEqual(val, item) {
+			return true
+		}
+	}
+	return false
 }
 
 func checkParamBound(paramName string, val any, bound ParameterBound, onExceed string) []RuleViolation {
@@ -471,80 +750,83 @@ func checkParamBound(paramName string, val any, bound ParameterBound, onExceed s
 		}
 	}
 
-	if len(bound.Enum) > 0 {
-		matched := false
-		for _, allowed := range bound.Enum {
-			if fmt.Sprintf("%v", allowed) == fmt.Sprintf("%v", val) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			out = append(out, RuleViolation{
-				RuleID:            "PARAM_ENUM_VIOLATION",
-				Parameter:         &paramName,
-				Message:           fmt.Sprintf("Parameter '%s'=%v not in allowed enum.", paramName, val),
-				ObservedValue:     val,
-				ConfiguredBound:   bound.Enum,
-				RecommendedAction: onExceed,
-			})
-		}
+	if len(bound.Enum) > 0 && !strictEnumMatch(val, bound.Enum) {
+		out = append(out, RuleViolation{
+			RuleID:            "PARAM_ENUM_VIOLATION",
+			Parameter:         &paramName,
+			Message:           fmt.Sprintf("Parameter '%s'=%v not in allowed enum.", paramName, val),
+			ObservedValue:     val,
+			ConfiguredBound:   bound.Enum,
+			RecommendedAction: onExceed,
+		})
 	}
 
-	if strVal, ok := val.(string); ok {
-		if bound.MaxLength != nil && len(strVal) > *bound.MaxLength {
+	hasStringBounds := bound.MaxLength != nil || bound.Regex != "" || len(bound.AllowDomains) > 0 || len(bound.DenyDomains) > 0
+	if hasStringBounds {
+		strVal, ok := val.(string)
+		if !ok {
 			out = append(out, RuleViolation{
-				RuleID:            "PARAM_MAX_LENGTH_EXCEEDED",
+				RuleID:            "PARAM_TYPE_MISMATCH",
 				Parameter:         &paramName,
-				Message:           fmt.Sprintf("Parameter '%s' length %d exceeds max_length %d.", paramName, len(strVal), *bound.MaxLength),
-				ObservedValue:     len(strVal),
-				ConfiguredBound:   *bound.MaxLength,
+				Message:           fmt.Sprintf("Parameter '%s' expected string value for domain/regex/length bound.", paramName),
+				ObservedValue:     val,
 				RecommendedAction: onExceed,
 			})
-		}
-		if bound.Regex != "" {
-			if re, err := regexp.Compile(bound.Regex); err == nil && !re.MatchString(strVal) {
+		} else {
+			if bound.MaxLength != nil && len(strVal) > *bound.MaxLength {
 				out = append(out, RuleViolation{
-					RuleID:            "PARAM_REGEX_MISMATCH",
+					RuleID:            "PARAM_MAX_LENGTH_EXCEEDED",
 					Parameter:         &paramName,
-					Message:           fmt.Sprintf("Parameter '%s' failed regex bound.", paramName),
-					ObservedValue:     strVal,
-					ConfiguredBound:   bound.Regex,
+					Message:           fmt.Sprintf("Parameter '%s' length %d exceeds max_length %d.", paramName, len(strVal), *bound.MaxLength),
+					ObservedValue:     len(strVal),
+					ConfiguredBound:   *bound.MaxLength,
 					RecommendedAction: onExceed,
 				})
 			}
-		}
-		if len(bound.AllowDomains) > 0 || len(bound.DenyDomains) > 0 {
-			dom := extractDomain(strVal)
-			for _, denied := range bound.DenyDomains {
-				if dom != "" && strings.EqualFold(dom, denied) {
+			if bound.Regex != "" {
+				if re, err := regexp.Compile(bound.Regex); err == nil && !re.MatchString(strVal) {
 					out = append(out, RuleViolation{
-						RuleID:            "PARAM_DOMAIN_DENIED",
+						RuleID:            "PARAM_REGEX_MISMATCH",
 						Parameter:         &paramName,
-						Message:           fmt.Sprintf("Domain '%s' is explicitly denied.", dom),
-						ObservedValue:     dom,
-						ConfiguredBound:   bound.DenyDomains,
+						Message:           fmt.Sprintf("Parameter '%s' failed regex bound.", paramName),
+						ObservedValue:     strVal,
+						ConfiguredBound:   bound.Regex,
 						RecommendedAction: onExceed,
 					})
 				}
 			}
-			if len(bound.AllowDomains) > 0 {
-				allowed := false
-				for _, ad := range bound.AllowDomains {
-					if dom != "" && strings.EqualFold(dom, ad) {
-						allowed = true
-						break
+			if len(bound.AllowDomains) > 0 || len(bound.DenyDomains) > 0 {
+				dom := extractDomain(strVal)
+				for _, denied := range bound.DenyDomains {
+					if dom != "" && strings.EqualFold(dom, denied) {
+						out = append(out, RuleViolation{
+							RuleID:            "PARAM_DOMAIN_DENIED",
+							Parameter:         &paramName,
+							Message:           fmt.Sprintf("Domain '%s' is explicitly denied.", dom),
+							ObservedValue:     dom,
+							ConfiguredBound:   bound.DenyDomains,
+							RecommendedAction: onExceed,
+						})
 					}
 				}
-				if !allowed {
-					out = append(out, RuleViolation{
-						RuleID:            "PARAM_DOMAIN_NOT_ALLOWED",
-						Parameter:         &paramName,
-						Message:           fmt.Sprintf("Domain '%s' is not in allow_domains.", dom),
-						ObservedValue:     dom,
-						ConfiguredBound:   bound.AllowDomains,
-						RecommendedAction: onExceed,
-					})
+				if len(bound.AllowDomains) > 0 {
+					allowed := false
+					for _, ad := range bound.AllowDomains {
+						if dom != "" && strings.EqualFold(dom, ad) {
+							allowed = true
+							break
+						}
+					}
+					if !allowed {
+						out = append(out, RuleViolation{
+							RuleID:            "PARAM_DOMAIN_NOT_ALLOWED",
+							Parameter:         &paramName,
+							Message:           fmt.Sprintf("Domain '%s' is not in allow_domains.", dom),
+							ObservedValue:     dom,
+							ConfiguredBound:   bound.AllowDomains,
+							RecommendedAction: onExceed,
+						})
+					}
 				}
 			}
 		}
@@ -553,7 +835,7 @@ func checkParamBound(paramName string, val any, bound ParameterBound, onExceed s
 }
 
 // ============================================================================
-// Live Bidirectional `tools/list` Split-Hash Verification (matches lockfile.py)
+// Live Bidirectional `tools/list` Split-Hash + Runtime Poisoning Verification
 // ============================================================================
 
 type ManifestDrift struct {
@@ -562,6 +844,93 @@ type ManifestDrift struct {
 	Kind       string `json:"kind"`
 	Action     string `json:"action"` // "block" | "warn"
 	Message    string `json:"message"`
+}
+
+var (
+	invisibleUnicodeRE = regexp.MustCompile("[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+	goPoisonRules      = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions?|disregard\s+(all\s+)?(previous|prior)|new\s+system\s+prompt)`),
+		regexp.MustCompile(`(?i)(do\s+not\s+(tell|inform|mention|show|notify)\s+the\s+user|silently\s+(send|forward|copy|bcc|exfiltrate|execute)|<\s*IMPORTANT\s*>|<\s*SYSTEM\s*>)`),
+		regexp.MustCompile(`(?i)(~/\.ssh|id_rsa|/etc/passwd|\.aws/credentials|\.env\b|exfiltrat|webhook\.site)`),
+	}
+)
+
+func hasRuntimePoisoning(tool map[string]any) bool {
+	b, _ := json.Marshal(tool)
+	s := string(b)
+	if invisibleUnicodeRE.MatchString(s) {
+		return true
+	}
+	cleaned := invisibleUnicodeRE.ReplaceAllString(s, "")
+	for _, re := range goPoisonRules {
+		if re.MatchString(cleaned) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExtractToolsFromMCPResponse parses `result.tools` from BOTH standard JSON and
+// MCP 2026-07-28 `text/event-stream` SSE responses!
+func ExtractToolsFromMCPResponse(body []byte, contentType string) ([]map[string]any, bool) {
+	extractFromObj := func(obj map[string]any) ([]map[string]any, bool) {
+		res, ok := obj["result"].(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		rawTools, ok := res["tools"].([]any)
+		if !ok {
+			return nil, false
+		}
+		out := make([]map[string]any, 0, len(rawTools))
+		for _, item := range rawTools {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out, true
+	}
+
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, false
+	}
+
+	if !strings.Contains(strings.ToLower(contentType), "text/event-stream") && trimmed[0] == '{' {
+		var obj map[string]any
+		if json.Unmarshal(trimmed, &obj) == nil {
+			return extractFromObj(obj)
+		}
+	}
+
+	// SSE `data:` frame extraction
+	var dataBuf []string
+	flush := func() ([]map[string]any, bool) {
+		if len(dataBuf) == 0 {
+			return nil, false
+		}
+		chunk := strings.TrimSpace(strings.Join(dataBuf, "\n"))
+		dataBuf = nil
+		if chunk == "" || chunk == "[DONE]" {
+			return nil, false
+		}
+		var obj map[string]any
+		if json.Unmarshal([]byte(chunk), &obj) == nil {
+			return extractFromObj(obj)
+		}
+		return nil, false
+	}
+	for _, line := range strings.Split(string(trimmed), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "data:") {
+			dataBuf = append(dataBuf, strings.TrimSpace(line[5:]))
+		} else if strings.TrimSpace(line) == "" {
+			if tools, ok := flush(); ok {
+				return tools, true
+			}
+		}
+	}
+	return flush()
 }
 
 func stripSchemaDescriptions(obj any) any {
@@ -591,7 +960,7 @@ func extractSchemaProse(obj any) any {
 	case map[string]any:
 		out := make(map[string]any)
 		for k, val := range v {
-			if (k == "description" || k == "title") {
+			if k == "description" || k == "title" {
 				if s, ok := val.(string); ok {
 					out[k] = strings.TrimSpace(s)
 				}
@@ -649,24 +1018,44 @@ func ComputeDescriptionSHA256(tool map[string]any) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// VerifyToolsListResponse checks an upstream MCP `tools/list` response against `prometheus.lock`.
+// VerifyToolsListResponse checks an upstream MCP `tools/list` response against `prometheus.lock`
+// AND runs Go runtime poisoning detection on every observed tool!
 func (e *Engine) VerifyToolsListResponse(serverName string, tools []map[string]any) (bool, []ManifestDrift) {
-	if e.Lockfile == nil {
-		return true, nil
+	var drifts []ManifestDrift
+	blocked := false
+
+	var pinnedSrv PinnedServerManifest
+	var hasPinnedSrv bool
+	if e.Lockfile != nil {
+		pinnedSrv, hasPinnedSrv = e.Lockfile.Servers[serverName]
 	}
-	pinnedSrv, ok := e.Lockfile.Servers[serverName]
+
 	trustTier := "third_party"
-	if ok && pinnedSrv.TrustTier != "" {
+	if hasPinnedSrv && pinnedSrv.TrustTier != "" {
 		trustTier = pinnedSrv.TrustTier
 	} else if srvCfg, exists := e.Config.MCPServers[serverName]; exists && srvCfg.TrustTier != "" {
 		trustTier = srvCfg.TrustTier
 	}
 
-	var drifts []ManifestDrift
-	blocked := false
 	for _, tool := range tools {
 		tname, _ := tool["name"].(string)
 		if tname == "" {
+			continue
+		}
+
+		// Runtime poisoning check fires on ALL servers (internal or third-party)
+		if hasRuntimePoisoning(tool) {
+			blocked = true
+			drifts = append(drifts, ManifestDrift{
+				ServerName: serverName,
+				ToolName:   tname,
+				Kind:       "day1_poisoning",
+				Action:     "block",
+				Message:    fmt.Sprintf("Runtime MCP tool poisoning detected on '%s.%s'.", serverName, tname),
+			})
+		}
+
+		if e.Lockfile == nil {
 			continue
 		}
 		obsStruct := ComputeStructuralSHA256(tool)
@@ -712,6 +1101,9 @@ func (e *Engine) VerifyToolsListResponse(serverName string, tools []map[string]a
 				Message:    fmt.Sprintf("Description drift detected on %s server '%s.%s'.", trustTier, serverName, tname),
 			})
 		}
+	}
+	if blocked {
+		e.Metrics.RugPullsBlocked.Add(1)
 	}
 	return !blocked, drifts
 }
@@ -768,7 +1160,6 @@ func (e *Engine) tokenizeValue(key string, val any) any {
 	}
 }
 
-// AppendLedgerRecord writes a Python-compatible HMAC-chained DecisionLedgerRecord to JSONL.
 func (e *Engine) AppendLedgerRecord(
 	traceparent string,
 	serverName string,
@@ -801,8 +1192,9 @@ func (e *Engine) AppendLedgerRecord(
 		idemPtr = &p
 	}
 
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	// Separate ledgerMu from hot-path policy mutex so file I/O never stalls evaluations
+	e.ledgerMu.Lock()
+	defer e.ledgerMu.Unlock()
 
 	rec := DecisionLedgerRecord{
 		Timestamp:          float64(time.Now().UnixNano()) / 1e9,
@@ -822,8 +1214,6 @@ func (e *Engine) AppendLedgerRecord(
 		PrevRecordHMAC:     e.lastRecordMac,
 	}
 
-	// Compute HMAC identically to Python SignedDecisionLedger._compute_record_hmac
-	// (canonical JSON excluding `record_hmac` with sorted keys and no whitespace).
 	recMap := make(map[string]any)
 	tmp, _ := json.Marshal(rec)
 	_ = json.Unmarshal(tmp, &recMap)
@@ -844,7 +1234,7 @@ func (e *Engine) AppendLedgerRecord(
 			return rec, err
 		}
 		defer f.Close()
-		line, err := json.Marshal(rec)
+		line, err := canonicalJSON(rec)
 		if err != nil {
 			return rec, err
 		}
@@ -855,8 +1245,36 @@ func (e *Engine) AppendLedgerRecord(
 	return rec, nil
 }
 
+func structToMapNoNulls(v any) any {
+	raw, _ := json.Marshal(v)
+	var out any
+	_ = json.Unmarshal(raw, &out)
+	return stripNulls(out)
+}
+
+func stripNulls(v any) any {
+	switch m := v.(type) {
+	case map[string]any:
+		clean := make(map[string]any, len(m))
+		for k, val := range m {
+			if val == nil {
+				continue
+			}
+			clean[k] = stripNulls(val)
+		}
+		return clean
+	case []any:
+		res := make([]any, len(m))
+		for i, item := range m {
+			res[i] = stripNulls(item)
+		}
+		return res
+	default:
+		return v
+	}
+}
+
 func canonicalJSON(v any) ([]byte, error) {
-	// Deterministically sorts map keys with no spaces and no HTML escaping (matches Python json.dumps).
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
@@ -884,22 +1302,24 @@ func toFloat64(v any) (float64, bool) {
 	}
 }
 
+// extractDomain safely extracts the domain without URL parser differentials
+// (`https://evil.com/?x=@acme.com` returns `evil.com`, NEVER `acme.com`).
 func extractDomain(val string) string {
 	v := strings.ToLower(strings.TrimSpace(val))
-	if idx := strings.LastIndex(v, "@"); idx >= 0 && idx < len(v)-1 {
-		return v[idx+1:]
+	if v == "" || strings.ContainsAny(v, " \t\r\n") {
+		return ""
 	}
-	if idx := strings.Index(v, "://"); idx >= 0 {
-		rest := v[idx+3:]
-		if slash := strings.Index(rest, "/"); slash >= 0 {
-			rest = rest[:slash]
+	if strings.Contains(v, "://") {
+		u, err := url.Parse(v)
+		if err != nil || u.User != nil {
+			return ""
 		}
-		if colon := strings.Index(rest, ":"); colon >= 0 {
-			rest = rest[:colon]
-		}
-		return rest
+		return strings.ToLower(u.Hostname())
 	}
-	if strings.Contains(v, ".") && !strings.Contains(v, " ") {
+	if m := emailRE.FindStringSubmatch(v); len(m) == 3 {
+		return strings.ToLower(m[2])
+	}
+	if strings.Contains(v, ".") && !strings.Contains(v, "@") && !strings.Contains(v, "/") {
 		return v
 	}
 	return ""

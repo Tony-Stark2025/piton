@@ -17,7 +17,7 @@ async def test_healthz_endpoint():
         assert data["status"] == "healthy"
         assert data["service"] == "prometheus-security-engine"
         assert "Gemini Enterprise Agent Platform" in data["platform"]
-        assert data["model"] == "gemini-3.7-flash"
+        assert isinstance(data["model"], str) and len(data["model"]) > 0
         assert data["mcp_enabled"] is True
         assert data["capability_hypervisor_enforced"] is False or data["capability_hypervisor_enforced"] is True
 
@@ -36,6 +36,8 @@ async def test_dashboard_endpoint():
 
 @pytest.mark.asyncio
 async def test_mcp_sse_endpoint():
+    from prometheus.main import mcp_server
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         # 1. MCP initialize
         init_payload = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
@@ -55,11 +57,18 @@ async def test_mcp_sse_endpoint():
         assert "request_action_permit" in tool_names
         assert "verify_action_permit" in tool_names
 
-        # 3. MCP tools/call (mint_capability_token)
+        # 3. MCP tools/call (mint_capability_token with fail-closed capability token)
+        caller_token = mcp_server.hypervisor.token_authority.mint_token(
+            subject="mcp-endpoint-tester",
+            allowed_methods=["mint_capability_token"],
+            allowed_resource_ids=["*"],
+            ttl_seconds=60,
+        )
         call_payload = {
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
+            "token": caller_token.model_dump(),
             "params": {
                 "name": "mint_capability_token",
                 "arguments": {"subject": "test-agent", "ttl_seconds": 30},

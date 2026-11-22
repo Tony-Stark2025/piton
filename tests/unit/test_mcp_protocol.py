@@ -17,7 +17,7 @@ from prometheus.mcp.server import PrometheusMCPServer
 
 @pytest.fixture
 def mcp_server():
-    return PrometheusMCPServer()
+    return PrometheusMCPServer(enforce_hypervisor=False)
 
 
 @pytest.mark.unit
@@ -122,6 +122,7 @@ class TestMCPProtocol:
     @pytest.mark.asyncio
     async def test_mcp_call_tool_request_action_permit(self, mcp_server):
         """Validates MCP tools/call for request_action_permit."""
+        mcp_server.hypervisor.registry.register_state("res-invoice-123", {"status": "draft"}, "GET /invoices/res-invoice-123")
         token = mcp_server.hypervisor.token_authority.mint_token(
             subject="agent-worker",
             allowed_methods=["tools/call", "PUT", "request_action_permit"],
