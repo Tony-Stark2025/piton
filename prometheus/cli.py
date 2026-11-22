@@ -24,6 +24,7 @@ import time
 from typing import Any, Dict, List, Optional
 import urllib.request
 
+from prometheus.iac.agent_config_lint import scan_agent_supply_chain
 from prometheus.iac.lockfile import (
     DriftAction,
     DriftKind,
@@ -46,6 +47,51 @@ from prometheus.iac.replay import (
 from prometheus.iac.schema import AgentIaCConfig, ManifestLockfile, TrustTier
 
 
+def _default_config_name() -> str:
+    if Path("piton.yaml").is_file():
+        return "piton.yaml"
+    if Path("prometheus.yaml").is_file():
+        return "prometheus.yaml"
+    return "piton.yaml" if Path(sys.argv[0]).name == "piton" else "prometheus.yaml"
+
+
+def _default_lock_name() -> str:
+    if Path("piton.lock").is_file():
+        return "piton.lock"
+    if Path("prometheus.lock").is_file():
+        return "prometheus.lock"
+    return "piton.lock" if Path(sys.argv[0]).name == "piton" else "prometheus.lock"
+
+
+def _cmd_scan(args: argparse.Namespace) -> int:
+    """
+    Fast, zero-config static scan for AI coding-agent supply-chain attacks:
+    - `.claude/settings.json` hook RCE (`curl|sh`, reverse shells, credential exfil, unsafe Bash wildcards)
+    - `.vscode/tasks.json` `folderOpen` autorun RCE
+    - `.cursor/rules/*`, `.cursorrules`, `CLAUDE.md`, `AGENTS.md`, skills/commands Unicode & prompt-injection poisoning
+    """
+    repo = Path(args.repo).resolve()
+    cfg_scan = scan_agent_supply_chain(repo)
+
+    if getattr(args, "json", False):
+        print(cfg_scan.model_dump_json(indent=2))
+        return 1 if cfg_scan.critical_or_high_count > 0 else 0
+
+    brand = "Piton" if Path(sys.argv[0]).name == "piton" else "Piton (Prometheus)"
+    print(f"{brand} Supply-Chain Scan — repo='{repo.name}'")
+    print(f"  Scanned agent files: {', '.join(cfg_scan.scanned_files) or 'none'}")
+    if not cfg_scan.findings:
+        print("  Status: CLEAN (0 findings)")
+        return 0
+
+    print(f"  Status: FLAGGED ({len(cfg_scan.findings)} finding(s), {cfg_scan.critical_or_high_count} CRITICAL/HIGH)")
+    for f in cfg_scan.findings:
+        print(f"  - [{f.severity.value.upper()}] {f.tool_name} ({f.field_path}) [{f.rule_id}]: {f.message}")
+        if f.matched_snippet:
+            print(f"      snippet: {f.matched_snippet}")
+    return 1 if cfg_scan.critical_or_high_count > 0 else 0
+
+
 def _cmd_init(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
     live_tools: Optional[Dict[str, List[Dict[str, Any]]]] = None
@@ -66,19 +112,32 @@ def _cmd_init(args: argparse.Namespace) -> int:
         live_server_tools=live_tools,
         allow_poisoned=args.allow_poisoned,
     )
+    use_piton_names = Path(sys.argv[0]).name == "piton"
+    cfg_filename = "piton.yaml" if use_piton_names else "prometheus.yaml"
+    lock_filename = "piton.lock" if use_piton_names else "prometheus.lock"
     paths = write_init_artifacts(repo, res)
+    if use_piton_names:
+        # Mirror cleanly to piton.yaml / piton.lock when invoked via `piton init`
+        piton_cfg = repo / cfg_filename
+        piton_lock = repo / lock_filename
+        paths["prometheus.yaml"].replace(piton_cfg)
+        paths["prometheus.lock"].replace(piton_lock)
+        paths = {cfg_filename: piton_cfg, lock_filename: piton_lock, ".env.agent": paths[".env.agent"]}
 
-    print(f"Prometheus initialized for agent '{res.config.agent.id}' (mode={res.config.agent.mode.value})")
-    print(f"  Discovered files: {', '.join(res.discovered_files) or 'none'}")
+    agent_cfg_scan = scan_agent_supply_chain(repo)
+    brand = "Piton" if use_piton_names else "Prometheus"
+    print(f"{brand} initialized for agent '{res.config.agent.id}' (mode={res.config.agent.mode.value})")
+    print(f"  Discovered files: {', '.join(res.discovered_files + agent_cfg_scan.scanned_files) or 'none'}")
     for label, p in paths.items():
         print(f"  Wrote {label}: {p}")
 
-    if res.poisoning_findings:
-        print(f"\n[!] Day-1 MCP Poisoning Linter flagged {len(res.poisoning_findings)} finding(s):")
-        for f in res.poisoning_findings:
+    all_findings = list(res.poisoning_findings) + list(agent_cfg_scan.findings)
+    if all_findings:
+        print(f"\n[!] Day-1 Supply-Chain & MCP Poisoning Linter flagged {len(all_findings)} finding(s):")
+        for f in all_findings:
             print(f"  - [{f.severity.value.upper()}] {f.server_name}.{f.tool_name} ({f.rule_id}): {f.message}")
         if not args.allow_poisoned:
-            print("  Quarantined CRITICAL/HIGH tools were excluded from prometheus.lock.")
+            print(f"  Quarantined CRITICAL/HIGH tools were excluded from {lock_filename}.")
             return 2
     return 0
 
@@ -93,11 +152,11 @@ def _cmd_lock(args: argparse.Namespace) -> int:
             Path(args.manifest).read_text(encoding="utf-8")
         )
     elif args.probe and config is not None:
-        manifest_data, probe_errs = probe_configured_servers(config)
+        manifest_data, probe_errs = probe_configured_servers(config, timeout=getattr(args, "probe_timeout", 8.0))
         for srv_name, err in probe_errs.items():
             print(f"[warn] Live probe failed for MCP server '{srv_name}': {err}", file=sys.stderr)
     else:
-        print("Error: provide --manifest <json> or --probe with prometheus.yaml.", file=sys.stderr)
+        print("Error: provide --manifest <json> or --probe with piton.yaml / prometheus.yaml.", file=sys.stderr)
         return 1
 
     servers_for_lock = {}
@@ -120,7 +179,7 @@ def _cmd_lock(args: argparse.Namespace) -> int:
         return 0
 
     if not lock_path.is_file():
-        print(f"Error: lockfile not found at {lock_path}. Run `prometheus init` first.", file=sys.stderr)
+        print(f"Error: lockfile not found at {lock_path}. Run `piton init` first.", file=sys.stderr)
         return 1
 
     existing_lock = ManifestLockfile.load_file(lock_path)
@@ -130,6 +189,11 @@ def _cmd_lock(args: argparse.Namespace) -> int:
         diff_res = diff_lockfiles(existing_lock, new_lock)
         diff_res.drifts.extend(shadowing)
         diff_res.blocked_count += len(shadowing)
+        # Include static coding-agent hook/skill/rules RCE findings when scanning repo
+        repo_dir = Path(getattr(args, "repo", ".") or ".").resolve()
+        if repo_dir.is_dir():
+            agent_scan = scan_agent_supply_chain(repo_dir)
+            poison_findings.extend(agent_scan.findings)
         # Always block CI on CRITICAL/HIGH Day-1 or rug-pull poisoning even on internal servers
         for pf in poison_findings:
             if pf.severity.value in ("critical", "high"):
@@ -504,13 +568,23 @@ def _cmd_control_plane(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    invoked = Path(sys.argv[0]).name if sys.argv else "piton"
+    prog_name = "piton" if invoked == "piton" else "piton"
+    cfg_default = _default_config_name()
+    lock_default = _default_lock_name()
+
     parser = argparse.ArgumentParser(
-        prog="prometheus",
-        description="Prometheus Agent Control Loop — MCP Manifest Pinning, Shadow Policy Replay & Signed Audit Ledgers",
+        prog=prog_name,
+        description="Piton — The package-lock.json & supply-chain firewall for AI coding agents (MCP split-hash pinning, Claude/Cursor hook RCE linting, shadow replay -> CEL/Cedar & Envoy ext_proc).",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="Scan repo MCP configs & env templates to generate prometheus.yaml & prometheus.lock")
+    p_scan = sub.add_parser("scan", help="Zero-config scan for Claude Code hook RCE, VS Code folderOpen autorun & poisoned Cursor/skill rules")
+    p_scan.add_argument("--repo", default=".", help="Repository path to scan")
+    p_scan.add_argument("--json", action="store_true", help="Output JSON findings")
+    p_scan.set_defaults(func=_cmd_scan)
+
+    p_init = sub.add_parser("init", help="Scan repo MCP configs, coding-agent hooks & env templates to generate piton.yaml & piton.lock")
     p_init.add_argument("--repo", default=".", help="Repository path to scan")
     p_init.add_argument("--agent-id", default=None, help="Explicit agent ID")
     p_init.add_argument("--owner", default="platform-team@example.com", help="Owning team email")
@@ -520,14 +594,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--allow-poisoned", action="store_true", help="Include tools even if poisoning lint flags them")
     p_init.set_defaults(func=_cmd_init)
 
-    p_compile = sub.add_parser("compile", help="Compile prometheus.yaml into .prometheus/runtime_policy.json for Go sidecar")
-    p_compile.add_argument("--config", default="prometheus.yaml")
+    p_compile = sub.add_parser("compile", help="Compile piton.yaml into .prometheus/runtime_policy.json for Go sidecar")
+    p_compile.add_argument("--config", default=cfg_default)
     p_compile.add_argument("--out", default=".prometheus/runtime_policy.json")
     p_compile.set_defaults(func=_cmd_compile)
 
     p_run = sub.add_parser("run", help="Boot zero-secret Go sidecar, scrub real env secrets, inject .env.agent, and run agent")
-    p_run.add_argument("--config", default="prometheus.yaml")
-    p_run.add_argument("--lockfile", default="prometheus.lock")
+    p_run.add_argument("--config", default=cfg_default)
+    p_run.add_argument("--lockfile", default=lock_default)
     p_run.add_argument("--ghost-env", default=".env.agent")
     p_run.add_argument("--traces", default=".prometheus/traces.jsonl")
     p_run.add_argument("--compiled-policy", default=".prometheus/runtime_policy.json")
@@ -537,10 +611,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run (prefix with --)")
     p_run.set_defaults(func=_cmd_run)
 
-    p_wrap = sub.add_parser("wrap", help="Transparent STDIO MCP wrapper enforcing prometheus.lock & bounds for Cursor/Claude Desktop")
-    p_wrap.add_argument("--server", required=True, help="MCP server name in prometheus.yaml / prometheus.lock")
-    p_wrap.add_argument("--config", default="prometheus.yaml")
-    p_wrap.add_argument("--lockfile", default="prometheus.lock")
+    p_wrap = sub.add_parser("wrap", help="Transparent STDIO MCP wrapper enforcing piton.lock & bounds for Cursor/Claude Code")
+    p_wrap.add_argument("--server", required=True, help="MCP server name in piton.yaml / piton.lock")
+    p_wrap.add_argument("--config", default=cfg_default)
+    p_wrap.add_argument("--lockfile", default=lock_default)
     p_wrap.add_argument("--traces", default=".prometheus/traces.jsonl")
     p_wrap.add_argument("cmd", nargs=argparse.REMAINDER, help="STDIO MCP server command (prefix with --)")
     p_wrap.set_defaults(func=_cmd_wrap)
@@ -552,18 +626,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_cp.add_argument("--slack-webhook", default="", help="Optional Slack Incoming Webhook URL for MRTR Block Kit prompts")
     p_cp.set_defaults(func=_cmd_control_plane)
 
-    p_lock = sub.add_parser("lock", help="Verify, diff, or update prometheus.lock MCP pins")
+    p_lock = sub.add_parser("lock", help="Verify, diff, or update split-hash MCP pins & agent hook/skill supply-chain checks")
+    p_lock.add_argument("--repo", default=".", help="Repository path to also lint for coding-agent hook/skill poisoning")
     p_lock.add_argument("--manifest", default=None, help="JSON file mapping server_name -> observed tools/list array")
-    p_lock.add_argument("--probe", action="store_true", help="Live-probe MCP servers from prometheus.yaml instead of static JSON")
-    p_lock.add_argument("--lockfile", default="prometheus.lock")
-    p_lock.add_argument("--config", default="prometheus.yaml")
+    p_lock.add_argument("--probe", action="store_true", help="Live-probe MCP servers from config instead of static JSON")
+    p_lock.add_argument("--probe-timeout", type=float, default=8.0, help="Per-server live probe timeout in seconds")
+    p_lock.add_argument("--lockfile", default=lock_default)
+    p_lock.add_argument("--config", default=cfg_default)
     p_lock.add_argument("--diff", action="store_true", help="Render PR-ready markdown diff against existing lockfile")
-    p_lock.add_argument("--update", action="store_true", help="Update prometheus.lock with observed manifests")
+    p_lock.add_argument("--update", action="store_true", help="Update lockfile with observed manifests")
     p_lock.add_argument("--allow-poisoned", action="store_true")
     p_lock.set_defaults(func=_cmd_lock)
 
-    p_replay = sub.add_parser("replay", help="Replay recorded shadow traces (or OTel logs) against candidate prometheus.yaml")
-    p_replay.add_argument("--config", default="prometheus.yaml")
+    p_replay = sub.add_parser("replay", help="Replay recorded shadow traces (or OTel logs) against candidate policy")
+    p_replay.add_argument("--config", default=cfg_default)
     p_replay.add_argument("--traces", default=".prometheus/traces.jsonl")
     p_replay.add_argument("--simulate-enforce", action="store_true", default=True)
     p_replay.add_argument("--strict", action="store_true", help="Exit non-zero if any calls would be blocked")

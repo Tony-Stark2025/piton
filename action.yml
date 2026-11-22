@@ -1,39 +1,47 @@
-name: "Prometheus MCP Lockfile & Poisoning Gate"
-description: "Diff-governed MCP manifest pinning (`prometheus.lock`), Day-1 prompt-injection linting, and cross-server tool shadowing PR gate."
+name: "Piton — MCP Lockfile & AI Agent Supply-Chain Gate"
+description: "Pin MCP manifests with split SHA-256 hashes, catch Claude Code / Cursor hook RCE & skill poisoning in PRs, and block third-party MCP rug pulls."
 branding:
-  icon: "shield"
+  icon: "lock"
   color: "orange"
 
 inputs:
+  repo:
+    description: "Repository directory to scan for coding-agent hooks, skills, rules, and MCP configs"
+    required: false
+    default: "."
   config:
-    description: "Path to prometheus.yaml"
+    description: "Path to piton.yaml or prometheus.yaml (auto-detected if omitted)"
     required: false
-    default: "prometheus.yaml"
+    default: ""
   lockfile:
-    description: "Path to prometheus.lock"
+    description: "Path to piton.lock or prometheus.lock (auto-detected if omitted)"
     required: false
-    default: "prometheus.lock"
+    default: ""
   manifest:
     description: "Path to observed MCP tools/list JSON manifest (optional when probe=true)"
     required: false
     default: ""
   probe:
-    description: "Set to 'true' to probe live HTTP/SSE and STDIO MCP servers declared in prometheus.yaml"
+    description: "Set to 'true' to live-probe HTTP/SSE and STDIO MCP servers declared in config"
     required: false
     default: "false"
   probe-timeout:
     description: "Per-server probe timeout in seconds when probe=true"
     required: false
     default: "8"
+  scan-only:
+    description: "Set to 'true' to run only static coding-agent hook/skill/rules RCE & poisoning scan without MCP lockfile diff"
+    required: false
+    default: "false"
   python-version:
-    description: "Python version to use for running Prometheus CLI"
+    description: "Python version to use for running Piton CLI"
     required: false
     default: "3.11"
 
 outputs:
   exit-code:
-    description: "Exit code returned by `prometheus lock --diff` (0=pass, 1=blocked)"
-    value: ${{ steps.lock_gate.outputs.exit_code }}
+    description: "Exit code returned by Piton gate (0=pass, 1=blocked)"
+    value: ${{ steps.piton_gate.outputs.exit_code }}
 
 runs:
   using: "composite"
@@ -43,43 +51,69 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
 
-    - name: Install Prometheus CLI
+    - name: Install Piton CLI (2-dep slim install)
       shell: bash
       run: |
         python -m pip install --upgrade pip >/dev/null
         pip install --quiet "${{ github.action_path }}"
 
-    - name: Run Prometheus MCP Lockfile Diff & Poisoning Gate
-      id: lock_gate
+    - name: Run Piton Supply-Chain & MCP Lockfile Gate
+      id: piton_gate
       shell: bash
       run: |
         set +e
-        CMD=(prometheus lock --config "${{ inputs.config }}" --lockfile "${{ inputs.lockfile }}" --diff)
-        if [ "${{ inputs.probe }}" = "true" ]; then
-          CMD+=(--probe --probe-timeout "${{ inputs.probe-timeout }}")
-        elif [ -n "${{ inputs.manifest }}" ]; then
-          CMD+=(--manifest "${{ inputs.manifest }}")
-        else
-          echo "::error::Prometheus Lockfile Gate requires either input 'manifest' or 'probe: true'."
-          exit 2
+        SCAN_OUT="$(piton scan --repo "${{ inputs.repo }}" 2>&1)"
+        SCAN_RC=$?
+        echo "${SCAN_OUT}"
+
+        LOCK_OUT=""
+        LOCK_RC=0
+        if [ "${{ inputs.scan-only }}" != "true" ]; then
+          CFG="${{ inputs.config }}"
+          LOCK="${{ inputs.lockfile }}"
+          if [ -z "${CFG}" ]; then
+            if [ -f "piton.yaml" ]; then CFG="piton.yaml"; else CFG="prometheus.yaml"; fi
+          fi
+          if [ -z "${LOCK}" ]; then
+            if [ -f "piton.lock" ]; then LOCK="piton.lock"; else LOCK="prometheus.lock"; fi
+          fi
+
+          CMD=(piton lock --config "${CFG}" --lockfile "${LOCK}" --repo "${{ inputs.repo }}" --diff)
+          if [ "${{ inputs.probe }}" = "true" ]; then
+            CMD+=(--probe --probe-timeout "${{ inputs.probe-timeout }}")
+          elif [ -n "${{ inputs.manifest }}" ]; then
+            CMD+=(--manifest "${{ inputs.manifest }}")
+          else
+            echo "::error::Piton Lockfile Gate requires input 'manifest', 'probe: true', or 'scan-only: true'."
+            exit 2
+          fi
+
+          LOCK_OUT="$("${CMD[@]}" 2>&1)"
+          LOCK_RC=$?
+          echo "${LOCK_OUT}"
         fi
 
-        OUTPUT="$("${CMD[@]}" 2>&1)"
-        RC=$?
-        echo "exit_code=${RC}" >> "${GITHUB_OUTPUT}"
-        echo "${OUTPUT}"
+        FINAL_RC=0
+        if [ "${SCAN_RC}" -ne 0 ] || [ "${LOCK_RC}" -ne 0 ]; then
+          FINAL_RC=1
+        fi
+        echo "exit_code=${FINAL_RC}" >> "${GITHUB_OUTPUT}"
 
         {
-          echo "## Prometheus MCP Lockfile Gate"
-          if [ "${RC}" -eq 0 ]; then
+          echo "## Piton — AI Agent Supply-Chain & MCP Lockfile Gate"
+          if [ "${FINAL_RC}" -eq 0 ]; then
             echo "**Status:** PASSED"
           else
-            echo "**Status:** BLOCKED (exit ${RC})"
+            echo "**Status:** BLOCKED (scan_rc=${SCAN_RC}, lock_rc=${LOCK_RC})"
           fi
           echo ""
           echo '```text'
-          echo "${OUTPUT}"
+          echo "${SCAN_OUT}"
+          if [ -n "${LOCK_OUT}" ]; then
+            echo ""
+            echo "${LOCK_OUT}"
+          fi
           echo '```'
         } >> "${GITHUB_STEP_SUMMARY}"
 
-        exit "${RC}"
+        exit "${FINAL_RC}"

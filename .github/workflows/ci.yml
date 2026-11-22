@@ -62,7 +62,7 @@ jobs:
           USE_VERTEX_AI: "false"
           GEMINI_API_KEY: ""
         run: |
-          timeout 300 pytest tests/test_control_plane_and_projection.py tests/test_sprint_abc_hardening_and_probe.py tests/test_agent_control_loop_v3.py tests/test_sidecar_integration.py tests/test_ifc_and_patch_risk_gate.py tests/test_security_hardening_fixes.py -v --tb=short
+          timeout 300 pytest tests/test_piton_agent_supply_chain.py tests/test_control_plane_and_projection.py tests/test_sprint_abc_hardening_and_probe.py tests/test_agent_control_loop_v3.py tests/test_sidecar_integration.py tests/test_ifc_and_patch_risk_gate.py tests/test_security_hardening_fixes.py -v --tb=short
           timeout 300 pytest tests/unit/ -v --tb=short --durations=10
           timeout 300 pytest tests/integration/ -v --tb=short --durations=10
           timeout 300 pytest tests/test_prometheus_v25_architecture.py tests/test_commercial_saas_and_agentic_owasp.py tests/adversarial/ tests/test_endpoints.py -v --tb=short --durations=10

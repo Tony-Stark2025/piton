@@ -5,13 +5,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "prometheus-enterprise"
 version = "0.3.0"
-description = "Prometheus Agent Control Loop — Diff-Governed MCP Manifest Pinning (prometheus.lock), Shadow-to-Enforce Policy Calibration, Signed Decision Ledgers & Envoy v3 ext_proc Sidecar"
+description = "Piton — The package-lock.json & supply-chain firewall for AI coding agents (split-hash MCP pinning, Claude/Cursor hook RCE linting, shadow replay -> CEL/Cedar & Envoy v3 ext_proc sidecar)"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
-    {name = "Prometheus Enterprise Security"}
+    {name = "Gaussian Labs"}
 ]
-keywords = ["mcp", "ai-agents", "security", "envoy", "ext-proc", "governance", "policy-as-code", "ci-cd"]
+keywords = ["piton", "mcp", "ai-agents", "claude-code", "cursor", "security", "envoy", "ext-proc", "supply-chain", "ci-cd"]
 dependencies = [
     "pydantic>=2.6.0",
     "pyyaml>=6.0.1",
@@ -36,6 +36,7 @@ dev = [
 ]
 
 [project.scripts]
+piton = "prometheus.cli:main"
 prometheus = "prometheus.cli:main"
 prometheus-scan = "prometheus.cli_scan:main"
 
