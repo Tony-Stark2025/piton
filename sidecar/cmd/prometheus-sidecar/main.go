@@ -61,6 +61,8 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address (/gw, /mcp, /healthz, /metrics)")
 	grpcAddr := flag.String("grpc-addr", "", "Optional Envoy v3 gRPC ext_proc listen address (e.g. 127.0.0.1:50051)")
 	redisAddr := flag.String("redis-addr", os.Getenv("PROMETHEUS_REDIS_ADDR"), "Optional Redis/Valkey host:port for multi-replica budgets & idempotency")
+	collectorURL := flag.String("collector-url", os.Getenv("PROMETHEUS_COLLECTOR_URL"), "Optional Prometheus Control Plane base URL for fleet ledger & MRTR escalations")
+	approvalWebhook := flag.String("approval-webhook", os.Getenv("PROMETHEUS_APPROVAL_WEBHOOK_URL"), "Optional dedicated webhook URL for MRTR human approval escalations")
 	flag.Parse()
 
 	cfg, err := policy.LoadConfigFile(*policyPath)
@@ -83,6 +85,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to initialize policy engine: %v", err)
 	}
+	eng.ConfigureControlPlane(*collectorURL, *approvalWebhook, os.Getenv("PROMETHEUS_CONTROL_API_KEY"))
 
 	var redisStore *store.RedisStore
 	if strings.TrimSpace(*redisAddr) != "" {
@@ -140,13 +143,16 @@ func main() {
 		if grpcServer != nil {
 			grpcServer.GracefulStop()
 		}
+		if eng.ControlPlane != nil {
+			eng.ControlPlane.Close()
+		}
 		if redisStore != nil {
 			redisStore.Close()
 		}
 	}()
 
-	fmt.Printf("prometheus-sidecar HTTP listening on http://%s (agent=%s mode=%s policy_sha=%s oidc_jwks=%v redis_backed=%v)\n",
-		*addr, cfg.Agent.ID, cfg.Agent.Mode, eng.PolicySHA256[:12], eng.OIDCVerifier != nil, redisStore != nil)
+	fmt.Printf("prometheus-sidecar HTTP listening on http://%s (agent=%s mode=%s policy_sha=%s oidc_jwks=%v redis_backed=%v control_plane=%v)\n",
+		*addr, cfg.Agent.ID, cfg.Agent.Mode, eng.PolicySHA256[:12], eng.OIDCVerifier != nil, redisStore != nil, eng.ControlPlane != nil)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("sidecar exited: %v", err)
 	}

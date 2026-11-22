@@ -90,11 +90,12 @@ type RateLimitPolicy struct {
 }
 
 type ToolPolicy struct {
-	Tier            string                    `json:"tier"`
-	IdempotencyKey  string                    `json:"idempotency_key,omitempty"`
-	ParameterBounds map[string]ParameterBound `json:"parameter_bounds,omitempty"`
-	RateLimit       *RateLimitPolicy          `json:"rate_limit,omitempty"`
-	OnBoundExceeded string                    `json:"on_bound_exceeded,omitempty"`
+	Tier               string                    `json:"tier"`
+	IdempotencyKey     string                    `json:"idempotency_key,omitempty"`
+	ParameterBounds    map[string]ParameterBound `json:"parameter_bounds,omitempty"`
+	RateLimit          *RateLimitPolicy          `json:"rate_limit,omitempty"`
+	ResponseProjection []string                  `json:"response_projection,omitempty"`
+	OnBoundExceeded    string                    `json:"on_bound_exceeded,omitempty"`
 }
 
 type MCPServerPolicy struct {
@@ -195,6 +196,7 @@ type Metrics struct {
 	MRTREscalated     atomic.Int64
 	RugPullsBlocked   atomic.Int64
 	SecretsRedacted   atomic.Int64
+	BytesProjected    atomic.Int64
 }
 
 // Engine executes sub-millisecond parameter-bound evaluation, split-hash MCP pinning,
@@ -207,6 +209,7 @@ type Engine struct {
 	LockfileSHA256 string
 	OIDCVerifier   *oidc.Verifier
 	StateStore     store.DistributedStore
+	ControlPlane   *ControlPlaneBridge
 	Metrics        Metrics
 
 	ledgerPath       string
@@ -425,6 +428,19 @@ func (e *Engine) VerifyMRTRApprovalToken(token, serverName, toolName string, arg
 // `input_required` result envelope with signed `requestState` for out-of-band approval.
 func (e *Engine) BuildMRTRInputRequiredPayload(reqID any, serverName, toolName string, args map[string]any, principal string, ev EvaluationResult) map[string]any {
 	stateToken := e.MintMRTRState(serverName, toolName, args, principal, false)
+	if e.ControlPlane != nil {
+		tokArgs, _ := e.tokenizeValue("arguments", args).(map[string]any)
+		e.ControlPlane.EmitMRTREscalation(map[string]any{
+			"timestamp":           float64(time.Now().UnixNano()) / 1e9,
+			"agent_id":            e.Config.Agent.ID,
+			"server_name":         serverName,
+			"tool_name":           toolName,
+			"principal":           principal,
+			"request_state":       stateToken,
+			"tokenized_arguments": tokArgs,
+			"violations":          ev.Violations,
+		})
+	}
 	return map[string]any{
 		"jsonrpc": "2.0",
 		"id":      reqID,
@@ -1177,6 +1193,9 @@ func (e *Engine) VerifyToolsListResponse(serverName string, tools []map[string]a
 	if blocked {
 		e.Metrics.RugPullsBlocked.Add(1)
 	}
+	if len(drifts) > 0 && e.ControlPlane != nil {
+		e.ControlPlane.EmitDriftEvents(e.Config.Agent.ID, serverName, drifts)
+	}
 	return !blocked, drifts
 }
 
@@ -1313,6 +1332,9 @@ func (e *Engine) AppendLedgerRecord(
 		if _, err := f.Write(append(line, '\n')); err != nil {
 			return rec, err
 		}
+	}
+	if e.ControlPlane != nil {
+		e.ControlPlane.EmitLedgerRecord(rec)
 	}
 	return rec, nil
 }

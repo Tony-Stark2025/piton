@@ -76,8 +76,11 @@ prometheus init --repo . [--probe] [--manifest observed_tools.json]
 # Wrap any local STDIO MCP server (Cursor / Claude Desktop) with live lockfile pinning & bounds
 prometheus wrap --config prometheus.yaml --lockfile prometheus.lock --server billing -- npx -y @modelcontextprotocol/server-billing
 
-# Run any local agent with zero live secrets in its process environment
-prometheus run --config prometheus.yaml -- python my_agent.py
+# Run central Enterprise Control Plane (MRTR Slack/Web Approval Bridge, Fleet Readiness UI & Signed SOC2 Export)
+prometheus control-plane --host 127.0.0.1 --port 8090 --db .prometheus/control_plane.db
+
+# Run any local agent with zero live secrets in its process environment (optionally streaming to Control Plane)
+prometheus run --config prometheus.yaml [--collector-url http://127.0.0.1:8090] -- python my_agent.py
 
 # Live / recent flight recorder view
 prometheus top --traces .prometheus/traces.jsonl [--follow]

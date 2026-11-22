@@ -140,6 +140,10 @@ class ToolPolicy(BaseModel):
     )
     parameter_bounds: Dict[str, ParameterBound] = Field(default_factory=dict)
     rate_limit: Optional[RateLimitPolicy] = None
+    response_projection: Optional[List[str]] = Field(
+        default=None,
+        description="Optional field allowlist (dot-paths supported) projected from MCP tool responses to cut token cost & exfiltration surface",
+    )
     on_bound_exceeded: BoundExceededAction = Field(default=BoundExceededAction.MRTR_ESCALATE)
 
 

@@ -41,6 +41,11 @@ redis:
   enabled: false
   addr: "redis-master.default.svc.cluster.local:6379"
 
+# Optional Central Prometheus Control Plane (Fleet Ledger Collector + MRTR Approval Bridge)
+controlPlane:
+  collectorUrl: ""
+  approvalWebhookUrl: ""
+
 # Envoy Gateway `EnvoyExtensionPolicy` CRD (wiring Envoy ext_proc -> prometheus-sidecar:50051)
 envoyGateway:
   enabled: true

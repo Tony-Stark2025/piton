@@ -412,6 +412,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "--ghost-env", str(args.ghost_env),
         "--addr", str(args.addr),
     ]
+    if getattr(args, "collector_url", None):
+        sidecar_cmd.extend(["--collector-url", str(args.collector_url)])
     sidecar_proc = subprocess.Popen(sidecar_cmd, env=os.environ.copy())
 
     try:
@@ -470,6 +472,37 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
     return wrap_stdio_mcp(args.server, cmd, config, lockfile, ledger=ledger)
 
 
+def _cmd_control_plane(args: argparse.Namespace) -> int:
+    from prometheus.control_plane.server import create_control_plane_server
+
+    signing_key = os.getenv("PROMETHEUS_LEDGER_SIGNING_KEY", "prometheus-ledger-signing-key").encode("utf-8")
+    api_key = os.getenv("PROMETHEUS_CONTROL_API_KEY", "")
+    slack_webhook = args.slack_webhook or os.getenv("PROMETHEUS_SLACK_WEBHOOK_URL", "")
+    slack_secret = os.getenv("PROMETHEUS_SLACK_SIGNING_SECRET", "")
+
+    httpd, store = create_control_plane_server(
+        host=args.host,
+        port=args.port,
+        db_path=args.db,
+        signing_key=signing_key,
+        api_key=api_key,
+        slack_webhook_url=slack_webhook,
+        slack_signing_secret=slack_secret,
+    )
+    print(
+        f"Prometheus Control Plane listening on http://{args.host}:{args.port} "
+        f"(db={args.db} slack_webhook={bool(slack_webhook)} api_key={bool(api_key)})"
+    )
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down Prometheus Control Plane...")
+    finally:
+        httpd.server_close()
+        store.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="prometheus",
@@ -499,6 +532,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--traces", default=".prometheus/traces.jsonl")
     p_run.add_argument("--compiled-policy", default=".prometheus/runtime_policy.json")
     p_run.add_argument("--addr", default="127.0.0.1:8080")
+    p_run.add_argument("--collector-url", default=os.getenv("PROMETHEUS_COLLECTOR_URL", ""), help="Optional Control Plane URL for fleet ledger & MRTR approvals")
     p_run.add_argument("--sidecar-bin", default=None)
     p_run.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run (prefix with --)")
     p_run.set_defaults(func=_cmd_run)
@@ -510,6 +544,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_wrap.add_argument("--traces", default=".prometheus/traces.jsonl")
     p_wrap.add_argument("cmd", nargs=argparse.REMAINDER, help="STDIO MCP server command (prefix with --)")
     p_wrap.set_defaults(func=_cmd_wrap)
+
+    p_cp = sub.add_parser("control-plane", help="Run central Fleet Ledger Collector, MRTR Slack/Webhook Approval Bridge & Governance UI")
+    p_cp.add_argument("--host", default="127.0.0.1")
+    p_cp.add_argument("--port", type=int, default=8090)
+    p_cp.add_argument("--db", default=".prometheus/control_plane.db")
+    p_cp.add_argument("--slack-webhook", default="", help="Optional Slack Incoming Webhook URL for MRTR Block Kit prompts")
+    p_cp.set_defaults(func=_cmd_control_plane)
 
     p_lock = sub.add_parser("lock", help="Verify, diff, or update prometheus.lock MCP pins")
     p_lock.add_argument("--manifest", default=None, help="JSON file mapping server_name -> observed tools/list array")

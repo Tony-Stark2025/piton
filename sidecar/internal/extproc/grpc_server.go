@@ -114,6 +114,7 @@ type streamState struct {
 	serverName      string
 	traceparent     string
 	rpcMethod       string
+	toolName        string
 	rpcID           any
 	respContentType string
 	respEncoding    string
@@ -190,6 +191,7 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 
 				if rpcReq.Method == "tools/call" {
 					toolName, _ := rpcReq.Params["name"].(string)
+					st.toolName = toolName
 					argsMap, _ := rpcReq.Params["arguments"].(map[string]any)
 					if argsMap == nil {
 						argsMap = map[string]any{}
@@ -310,18 +312,33 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 				}
 			}
 
-			// 2. Response-phase secret scrubbing via BodyMutation
-			if bodyMut == nil && s.SecretsProvider != nil && len(respBody) > 0 {
-				secrets := s.SecretsProvider()
-				if len(secrets) > 0 {
-					scrubbed, hits := scrub.ScrubBytes(respBody, secrets)
-					if hits > 0 {
-						s.Engine.Metrics.SecretsRedacted.Add(int64(hits))
-						bodyMut = &ext_procv3.BodyMutation{
-							Mutation: &ext_procv3.BodyMutation_Body{
-								Body: scrubbed,
-							},
+			// 2. Uber-style Declarative Response Projection + Response-phase Secret Scrubbing via BodyMutation
+			if bodyMut == nil && len(respBody) > 0 {
+				working := respBody
+				mutated := false
+				if st.rpcMethod == "tools/call" && st.toolName != "" {
+					projected, saved := s.Engine.ProjectMCPToolResponse(st.serverName, st.toolName, working)
+					if saved > 0 || !bytes.Equal(projected, working) {
+						working = projected
+						mutated = true
+					}
+				}
+				if s.SecretsProvider != nil {
+					secrets := s.SecretsProvider()
+					if len(secrets) > 0 {
+						scrubbed, hits := scrub.ScrubBytes(working, secrets)
+						if hits > 0 {
+							s.Engine.Metrics.SecretsRedacted.Add(int64(hits))
+							working = scrubbed
+							mutated = true
 						}
+					}
+				}
+				if mutated {
+					bodyMut = &ext_procv3.BodyMutation{
+						Mutation: &ext_procv3.BodyMutation_Body{
+							Body: working,
+						},
 					}
 				}
 			}

@@ -39,6 +39,12 @@ spec:
             {{- if .Values.redis.enabled }}
             - "--redis-addr={{ .Values.redis.addr }}"
             {{- end }}
+            {{- if .Values.controlPlane.collectorUrl }}
+            - "--collector-url={{ .Values.controlPlane.collectorUrl }}"
+            {{- end }}
+            {{- if .Values.controlPlane.approvalWebhookUrl }}
+            - "--approval-webhook={{ .Values.controlPlane.approvalWebhookUrl }}"
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.service.httpPort }}

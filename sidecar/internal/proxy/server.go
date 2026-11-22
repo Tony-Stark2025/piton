@@ -79,6 +79,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "# TYPE prometheus_sidecar_mrtr_escalated_total counter\nprometheus_sidecar_mrtr_escalated_total %d\n", m.MRTREscalated.Load())
 	fmt.Fprintf(w, "# TYPE prometheus_sidecar_rug_pulls_blocked_total counter\nprometheus_sidecar_rug_pulls_blocked_total %d\n", m.RugPullsBlocked.Load())
 	fmt.Fprintf(w, "# TYPE prometheus_sidecar_secrets_redacted_total counter\nprometheus_sidecar_secrets_redacted_total %d\n", m.SecretsRedacted.Load())
+	fmt.Fprintf(w, "# TYPE prometheus_sidecar_bytes_projected_total counter\nprometheus_sidecar_bytes_projected_total %d\n", m.BytesProjected.Load())
 }
 
 func resolveSecret(source string) (string, error) {
@@ -467,6 +468,12 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 			if len(drifts) > 0 {
 				w.Header().Set("X-Prometheus-Manifest-Warnings", fmt.Sprintf("%d", len(drifts)))
 			}
+		}
+	}
+
+	if rpcReq.Method == "tools/call" {
+		if toolName, ok := rpcReq.Params["name"].(string); ok && toolName != "" {
+			respBytes, _ = s.Engine.ProjectMCPToolResponse(serverName, toolName, respBytes)
 		}
 	}
 
