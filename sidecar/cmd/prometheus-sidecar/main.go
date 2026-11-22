@@ -21,6 +21,7 @@ import (
 	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/extproc"
 	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/policy"
 	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/proxy"
+	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/store"
 )
 
 func parseGhostEnvFile(path string, cfg policy.AgentIaCConfig) map[string]string {
@@ -59,6 +60,7 @@ func main() {
 	ghostEnvPath := flag.String("ghost-env", ".env.agent", "Optional path to .env.agent ghost handles")
 	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address (/gw, /mcp, /healthz, /metrics)")
 	grpcAddr := flag.String("grpc-addr", "", "Optional Envoy v3 gRPC ext_proc listen address (e.g. 127.0.0.1:50051)")
+	redisAddr := flag.String("redis-addr", os.Getenv("PROMETHEUS_REDIS_ADDR"), "Optional Redis/Valkey host:port for multi-replica budgets & idempotency")
 	flag.Parse()
 
 	cfg, err := policy.LoadConfigFile(*policyPath)
@@ -80,6 +82,18 @@ func main() {
 	eng, err := policy.NewEngine(cfg, lock, *tracesPath, signingKey, tokenizerKey)
 	if err != nil {
 		log.Fatalf("failed to initialize policy engine: %v", err)
+	}
+
+	var redisStore *store.RedisStore
+	if strings.TrimSpace(*redisAddr) != "" {
+		redisStore = store.NewRedisStore(*redisAddr, os.Getenv("PROMETHEUS_REDIS_PASSWORD"), "prometheus:"+cfg.Agent.ID+":")
+		if err := redisStore.Ping(); err != nil {
+			if cfg.Agent.Mode == "enforce" {
+				log.Fatalf("failed to connect to Redis at %s in enforce mode: %v", *redisAddr, err)
+			}
+			log.Printf("warning: Redis at %s unreachable in shadow mode (%v); continuing with fail-open warning", *redisAddr, err)
+		}
+		eng.StateStore = redisStore
 	}
 
 	ghosts := parseGhostEnvFile(*ghostEnvPath, cfg)
@@ -126,10 +140,13 @@ func main() {
 		if grpcServer != nil {
 			grpcServer.GracefulStop()
 		}
+		if redisStore != nil {
+			redisStore.Close()
+		}
 	}()
 
-	fmt.Printf("prometheus-sidecar HTTP listening on http://%s (agent=%s mode=%s policy_sha=%s oidc_jwks=%v)\n",
-		*addr, cfg.Agent.ID, cfg.Agent.Mode, eng.PolicySHA256[:12], eng.OIDCVerifier != nil)
+	fmt.Printf("prometheus-sidecar HTTP listening on http://%s (agent=%s mode=%s policy_sha=%s oidc_jwks=%v redis_backed=%v)\n",
+		*addr, cfg.Agent.ID, cfg.Agent.Mode, eng.PolicySHA256[:12], eng.OIDCVerifier != nil, redisStore != nil)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("sidecar exited: %v", err)
 	}

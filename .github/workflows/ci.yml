@@ -70,3 +70,48 @@ jobs:
       - name: Verify 60-Second End-to-End Quickstart Demo
         run: |
           bash examples/quickstart-billing-agent/run_demo.sh
+
+  envoy-wire-e2e:
+    name: Real Envoy v1.33 Proxy <-> Go Sidecar ext_proc Wire E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Boot Real Envoy v1.33 + Distroless Sidecar + MCP Upstream
+        working-directory: deploy/envoy-e2e
+        run: |
+          docker compose up -d --build
+
+      - name: Run Live Envoy ext_proc Wire Verification
+        working-directory: deploy/envoy-e2e
+        run: |
+          python3 verify_envoy_e2e.py
+
+      - name: Dump Logs on Failure & Tear Down
+        if: always()
+        working-directory: deploy/envoy-e2e
+        run: |
+          docker compose logs || true
+          docker compose down -v
+
+  helm-chart-lint:
+    name: Validate Helm Chart & EnvoyExtensionPolicy CRD
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Helm & Lint/Template Chart
+        run: |
+          helm lint deploy/helm/prometheus-sidecar
+          helm template prometheus-test deploy/helm/prometheus-sidecar \
+            --set redis.enabled=true \
+            --set serviceMonitor.enabled=true \
+            --set envoyGateway.enabled=true > /tmp/rendered.yaml
+          grep -q "kind: EnvoyExtensionPolicy" /tmp/rendered.yaml
+          grep -q "kind: ServiceMonitor" /tmp/rendered.yaml
+          grep -q -- "--redis-addr=" /tmp/rendered.yaml
+

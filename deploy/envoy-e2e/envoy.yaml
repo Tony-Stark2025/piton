@@ -1,0 +1,88 @@
+# Real Envoy Proxy <-> Prometheus Go Sidecar (`ext_proc` gRPC) End-to-End Wire Harness.
+# Runs actual Envoy Proxy v1.33 forwarding /mcp/* through prometheus-sidecar:50051
+# to a live HTTP MCP upstream server to prove real Envoy HTTP/2 ext_proc wire parity.
+static_resources:
+  clusters:
+    - name: prometheus_ext_proc
+      type: STRICT_DNS
+      connect_timeout: 0.5s
+      lb_policy: ROUND_ROBIN
+      health_checks:
+        - timeout: 1s
+          interval: 2s
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          grpc_health_check: {}
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: prometheus_ext_proc
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: prometheus-sidecar
+                      port_value: 50051
+
+    - name: upstream_mcp
+      type: STRICT_DNS
+      connect_timeout: 1s
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: upstream_mcp
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: upstream-mcp
+                      port_value: 9001
+
+  listeners:
+    - name: mcp_ingress
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 10000
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: prometheus_mcp_e2e
+                route_config:
+                  name: mcp_routes
+                  virtual_hosts:
+                    - name: mcp_backends
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/mcp/" }
+                          route: { cluster: upstream_mcp }
+                http_filters:
+                  - name: envoy.filters.http.ext_proc
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: prometheus_ext_proc
+                        timeout: 2s
+                      message_timeout: 2s
+                      failure_mode_allow: false
+                      processing_mode:
+                        request_header_mode: SEND
+                        response_header_mode: SEND
+                        request_body_mode: BUFFERED
+                        response_body_mode: BUFFERED
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901

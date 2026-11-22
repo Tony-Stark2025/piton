@@ -1,0 +1,19 @@
+{
+  "version": "1",
+  "generated_at": 1795343475.9279156,
+  "servers": {
+    "billing-third-party": {
+      "trust_tier": "third_party",
+      "url": "http://upstream-mcp:9001/mcp/billing-third-party",
+      "tools": {
+        "refund_invoice": {
+          "structural_sha256": "c4fe34f563ec90b987a70d7c04da81a43130c073f19c0f999437ba0f7537c86d",
+          "description_sha256": "10acbfaf2f0eaa31bafe870dd094a23b930041cd6b46fb491252b278678f2832",
+          "description_preview": "Refund a customer invoice within autonomous bounds.",
+          "poisoning_lint_passed": true,
+          "poisoning_warnings": []
+        }
+      }
+    }
+  }
+}

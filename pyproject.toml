@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prometheus-enterprise"
-version = "0.2.0"
-description = "Autonomous Continuous API Exploit Verification & Zero-Regression Auto-Patching Engine for CI/CD"
+version = "0.3.0"
+description = "Prometheus Agent Control Loop — Diff-Governed MCP Manifest Pinning (prometheus.lock), Shadow-to-Enforce Policy Calibration, Signed Decision Ledgers & Envoy v3 ext_proc Sidecar"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
     {name = "Prometheus Enterprise Security"}
 ]
-keywords = ["security", "api", "pentesting", "dast", "bola", "idor", "bfla", "owasp", "ci-cd"]
+keywords = ["mcp", "ai-agents", "security", "envoy", "ext-proc", "governance", "policy-as-code", "ci-cd"]
 dependencies = [
     "httpx>=0.27.0",
     "pydantic>=2.6.0",

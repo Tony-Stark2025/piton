@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/oidc"
+	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/store"
 )
 
 const (
@@ -205,6 +206,7 @@ type Engine struct {
 	PolicySHA256   string
 	LockfileSHA256 string
 	OIDCVerifier   *oidc.Verifier
+	StateStore     store.DistributedStore
 	Metrics        Metrics
 
 	ledgerPath       string
@@ -513,6 +515,9 @@ func (e *Engine) EvaluateToolCall(
 	}
 
 	var idemScoped string
+	var rollingKey string
+	var rollingVal float64
+	var trackRolling bool
 	if hasTool {
 		onExceed := toolPolicy.OnBoundExceeded
 		if onExceed == "" {
@@ -529,37 +534,71 @@ func (e *Engine) EvaluateToolCall(
 				})
 			} else {
 				idemScoped = serverName + "::" + toolName + "::" + idempotencyKey
-				e.mu.Lock()
-				if ts, exists := e.seenIdemKeys[idemScoped]; exists && now.Sub(ts) <= idemEntryTTL {
-					violations = append(violations, RuleViolation{
-						RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
-						Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
-						ObservedValue:     idempotencyKey,
-						RecommendedAction: "block",
-					})
+				if e.StateStore != nil {
+					exists, err := e.StateStore.CheckIdempotency(idemScoped)
+					if err != nil {
+						violations = append(violations, RuleViolation{
+							RuleID:            "SHARED_STATE_UNAVAILABLE",
+							Message:           fmt.Sprintf("Distributed Redis idempotency check failed: %v", err),
+							RecommendedAction: "block",
+						})
+					} else if exists {
+						violations = append(violations, RuleViolation{
+							RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
+							Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
+							ObservedValue:     idempotencyKey,
+							RecommendedAction: "block",
+						})
+					}
+				} else {
+					e.mu.Lock()
+					if ts, exists := e.seenIdemKeys[idemScoped]; exists && now.Sub(ts) <= idemEntryTTL {
+						violations = append(violations, RuleViolation{
+							RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
+							Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
+							ObservedValue:     idempotencyKey,
+							RecommendedAction: "block",
+						})
+					}
+					e.mu.Unlock()
 				}
-				e.mu.Unlock()
 			}
 		}
 
-		// 3. Per-trace & rolling 1h per-principal cumulative budgets (kills cross-trace smurfing)
+		// 3. Per-trace & rolling 1h per-principal cumulative budgets (kills cross-trace & multi-replica smurfing)
 		if toolPolicy.RateLimit != nil {
-			e.mu.Lock()
-			e.pruneCachesLocked(now)
 			if toolPolicy.RateLimit.MaxCallsPerTrace != nil {
 				ck := traceparent + "::" + serverName + "::" + toolName
-				cur := e.traceCounts[ck]
-				if now.Sub(cur.UpdatedAt) > traceEntryTTL {
-					cur.Count = 0
+				var traceCount int
+				if e.StateStore != nil {
+					c, err := e.StateStore.IncrTraceCount(ck, traceEntryTTL)
+					if err != nil {
+						violations = append(violations, RuleViolation{
+							RuleID:            "SHARED_STATE_UNAVAILABLE",
+							Message:           fmt.Sprintf("Distributed Redis trace counter failed: %v", err),
+							RecommendedAction: "block",
+						})
+					} else {
+						traceCount = c
+					}
+				} else {
+					e.mu.Lock()
+					e.pruneCachesLocked(now)
+					cur := e.traceCounts[ck]
+					if now.Sub(cur.UpdatedAt) > traceEntryTTL {
+						cur.Count = 0
+					}
+					cur.Count++
+					cur.UpdatedAt = now
+					e.traceCounts[ck] = cur
+					traceCount = cur.Count
+					e.mu.Unlock()
 				}
-				cur.Count++
-				cur.UpdatedAt = now
-				e.traceCounts[ck] = cur
-				if cur.Count > *toolPolicy.RateLimit.MaxCallsPerTrace {
+				if traceCount > *toolPolicy.RateLimit.MaxCallsPerTrace {
 					violations = append(violations, RuleViolation{
 						RuleID:            "TRACE_RATE_LIMIT_EXCEEDED",
-						Message:           fmt.Sprintf("Call #%d to '%s.%s' exceeds max_calls_per_trace=%d.", cur.Count, serverName, toolName, *toolPolicy.RateLimit.MaxCallsPerTrace),
-						ObservedValue:     cur.Count,
+						Message:           fmt.Sprintf("Call #%d to '%s.%s' exceeds max_calls_per_trace=%d.", traceCount, serverName, toolName, *toolPolicy.RateLimit.MaxCallsPerTrace),
+						ObservedValue:     traceCount,
 						ConfiguredBound:   *toolPolicy.RateLimit.MaxCallsPerTrace,
 						RecommendedAction: onExceed,
 					})
@@ -567,49 +606,67 @@ func (e *Engine) EvaluateToolCall(
 			}
 
 			if toolPolicy.RateLimit.MaxCallsPerHour != nil || toolPolicy.RateLimit.MaxSumPerHour != nil {
-				pkey := oboPrincipal + "::" + e.Config.Agent.ID + "::" + serverName + "::" + toolName
-				samples := e.principalRolling[pkey]
-				cutoff := now.Add(-rollingWindowDur)
-				kept := samples[:0]
-				var sum float64
-				for _, s := range samples {
-					if s.At.After(cutoff) {
-						kept = append(kept, s)
-						sum += s.Value
-					}
-				}
+				trackRolling = true
+				rollingKey = oboPrincipal + "::" + e.Config.Agent.ID + "::" + serverName + "::" + toolName
 				sumParam := toolPolicy.RateLimit.SumParameter
 				if sumParam == "" {
 					sumParam = "amount"
 				}
 				valNum, _ := toFloat64(arguments[sumParam])
-				nextCalls := len(kept) + 1
-				nextSum := sum + valNum
-				if toolPolicy.RateLimit.MaxCallsPerHour != nil && nextCalls > *toolPolicy.RateLimit.MaxCallsPerHour {
-					violations = append(violations, RuleViolation{
-						RuleID:            "PRINCIPAL_HOURLY_CALLS_EXCEEDED",
-						Message:           fmt.Sprintf("Hourly call #%d for principal exceeds max_calls_per_hour=%d.", nextCalls, *toolPolicy.RateLimit.MaxCallsPerHour),
-						ObservedValue:     nextCalls,
-						ConfiguredBound:   *toolPolicy.RateLimit.MaxCallsPerHour,
-						RecommendedAction: onExceed,
-					})
+				rollingVal = valNum
+
+				var curCalls int
+				var curSum float64
+				var stateErr error
+				if e.StateStore != nil {
+					curCalls, curSum, stateErr = e.StateStore.GetRollingWindow(rollingKey, now, rollingWindowDur)
+					if stateErr != nil {
+						violations = append(violations, RuleViolation{
+							RuleID:            "SHARED_STATE_UNAVAILABLE",
+							Message:           fmt.Sprintf("Distributed Redis rolling-window check failed: %v", stateErr),
+							RecommendedAction: "block",
+						})
+					}
+				} else {
+					e.mu.Lock()
+					e.pruneCachesLocked(now)
+					samples := e.principalRolling[rollingKey]
+					cutoff := now.Add(-rollingWindowDur)
+					kept := samples[:0]
+					for _, s := range samples {
+						if s.At.After(cutoff) {
+							kept = append(kept, s)
+							curSum += s.Value
+						}
+					}
+					curCalls = len(kept)
+					e.principalRolling[rollingKey] = kept
+					e.mu.Unlock()
 				}
-				if toolPolicy.RateLimit.MaxSumPerHour != nil && nextSum > *toolPolicy.RateLimit.MaxSumPerHour {
-					violations = append(violations, RuleViolation{
-						RuleID:            "PRINCIPAL_HOURLY_SUM_EXCEEDED",
-						Parameter:         &sumParam,
-						Message:           fmt.Sprintf("Cumulative 1h %s=%.2f exceeds max_sum_per_hour=%.2f.", sumParam, nextSum, *toolPolicy.RateLimit.MaxSumPerHour),
-						ObservedValue:     nextSum,
-						ConfiguredBound:   *toolPolicy.RateLimit.MaxSumPerHour,
-						RecommendedAction: onExceed,
-					})
+				if stateErr == nil {
+					nextCalls := curCalls + 1
+					nextSum := curSum + valNum
+					if toolPolicy.RateLimit.MaxCallsPerHour != nil && nextCalls > *toolPolicy.RateLimit.MaxCallsPerHour {
+						violations = append(violations, RuleViolation{
+							RuleID:            "PRINCIPAL_HOURLY_CALLS_EXCEEDED",
+							Message:           fmt.Sprintf("Hourly call #%d for principal exceeds max_calls_per_hour=%d.", nextCalls, *toolPolicy.RateLimit.MaxCallsPerHour),
+							ObservedValue:     nextCalls,
+							ConfiguredBound:   *toolPolicy.RateLimit.MaxCallsPerHour,
+							RecommendedAction: onExceed,
+						})
+					}
+					if toolPolicy.RateLimit.MaxSumPerHour != nil && nextSum > *toolPolicy.RateLimit.MaxSumPerHour {
+						violations = append(violations, RuleViolation{
+							RuleID:            "PRINCIPAL_HOURLY_SUM_EXCEEDED",
+							Parameter:         &sumParam,
+							Message:           fmt.Sprintf("Cumulative 1h %s=%.2f exceeds max_sum_per_hour=%.2f.", sumParam, nextSum, *toolPolicy.RateLimit.MaxSumPerHour),
+							ObservedValue:     nextSum,
+							ConfiguredBound:   *toolPolicy.RateLimit.MaxSumPerHour,
+							RecommendedAction: onExceed,
+						})
+					}
 				}
-				if len(violations) == 0 {
-					kept = append(kept, rollingSample{At: now, Value: valNum})
-				}
-				e.principalRolling[pkey] = kept
 			}
-			e.mu.Unlock()
 		}
 
 		// 4. Parameter bounds (fail closed on omitted required bounded params)
@@ -658,12 +715,27 @@ func (e *Engine) EvaluateToolCall(
 		}
 	}
 
-	// Commit idempotency key ONLY if call is admitted in enforce mode (never burn key on rejected calls)
-	if verdict == "allow" && idemScoped != "" && e.Config.Agent.Mode == "enforce" {
-		e.mu.Lock()
-		e.pruneCachesLocked(now)
-		e.seenIdemKeys[idemScoped] = now
-		e.mu.Unlock()
+	// Commit rolling-window sample & idempotency key ONLY if call is admitted (never burn keys/budgets on rejected calls)
+	if verdict == "allow" {
+		if trackRolling {
+			if e.StateStore != nil {
+				_ = e.StateStore.RecordRollingSample(rollingKey, now, rollingWindowDur, rollingVal)
+			} else {
+				e.mu.Lock()
+				e.principalRolling[rollingKey] = append(e.principalRolling[rollingKey], rollingSample{At: now, Value: rollingVal})
+				e.mu.Unlock()
+			}
+		}
+		if idemScoped != "" && e.Config.Agent.Mode == "enforce" {
+			if e.StateStore != nil {
+				_ = e.StateStore.CommitIdempotency(idemScoped, idemEntryTTL)
+			} else {
+				e.mu.Lock()
+				e.pruneCachesLocked(now)
+				e.seenIdemKeys[idemScoped] = now
+				e.mu.Unlock()
+			}
+		}
 	}
 
 	switch verdict {

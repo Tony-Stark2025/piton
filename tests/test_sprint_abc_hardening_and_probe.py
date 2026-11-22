@@ -323,3 +323,162 @@ def test_otel_span_ingestion_and_cel_cedar_policy_exporters(tmp_path: Path):
     cedar = export_cedar_policies(cfg)
     assert 'action == MCP::Action::"billing-mcp:refund_invoice"' in cedar
     assert 'context.arguments.customer_email like "*@acme.com"' in cedar
+
+
+def test_real_world_mcp_streamable_http_session_pagination_and_nodejs_stdio(tmp_path: Path):
+    """
+    Exercises real-world MCP protocol behavior:
+    1. Stateful Streamable-HTTP server requiring `initialize` -> `Mcp-Session-Id` ->
+       `notifications/initialized` -> paginated `tools/list` (`nextCursor`) over `text/event-stream` SSE.
+    2. Real Node.js STDIO MCP server with paginated `tools/list`, string vs int JSON-RPC IDs,
+       and `notifications/initialized` passthrough.
+    3. Non-blocking timeout on hung STDIO server.
+    """
+    import shutil
+    import time
+
+    state = {"initialized": False, "seen_session": False}
+
+    class StatefulStreamableMCPHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            return
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            req = json.loads(self.rfile.read(length).decode("utf-8"))
+            method = req.get("method")
+            req_id = req.get("id")
+
+            if method == "initialize":
+                body = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "result": {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}, "serverInfo": {"name": "stateful-mcp", "version": "1.0"}},
+                }).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Mcp-Session-Id", "sess-live-999")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            if self.headers.get("Mcp-Session-Id") != "sess-live-999":
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b'{"error":"missing Mcp-Session-Id"}')
+                return
+
+            state["seen_session"] = True
+            if method == "notifications/initialized":
+                state["initialized"] = True
+                self.send_response(202)
+                self.end_headers()
+                return
+
+            if method == "tools/list":
+                cursor = (req.get("params") or {}).get("cursor")
+                if cursor is None:
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "tools": [{"name": "list_orders", "description": "List orders", "inputSchema": {"type": "object"}}],
+                            "nextCursor": "page-2",
+                        },
+                    }
+                else:
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "tools": [{"name": "refund_order", "description": "Refund order", "inputSchema": {"type": "object"}}],
+                        },
+                    }
+                sse = f"event: message\ndata: {json.dumps(payload)}\n\n".encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(sse)))
+                self.end_headers()
+                self.wfile.write(sse)
+                return
+
+            self.send_response(404)
+            self.end_headers()
+
+    httpd = HTTPServer(("127.0.0.1", 0), StatefulStreamableMCPHandler)
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        tools = probe_http_mcp_tools(f"http://127.0.0.1:{port}/mcp")
+        assert state["seen_session"] is True
+        assert state["initialized"] is True
+        assert [tool["name"] for tool in tools] == ["list_orders", "refund_order"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+    # Real Node.js STDIO MCP server with pagination, notifications, and string/int IDs
+    node_bin = shutil.which("node")
+    if node_bin:
+        node_mcp = tmp_path / "node_mcp_server.mjs"
+        node_mcp.write_text(
+            """
+import readline from "node:readline";
+const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+rl.on("line", (line) => {
+  if (!line.trim()) return;
+  const req = JSON.parse(line);
+  if (req.id === undefined || req.id === null) return; // notification
+  if (req.method === "initialize") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { protocolVersion: "2025-03-26", capabilities: {} } }) + "\\n");
+  } else if (req.method === "tools/list") {
+    const cursor = req.params && req.params.cursor;
+    if (!cursor) {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { tools: [{ name: "read_file", description: "Read file", inputSchema: { type: "object" } }], nextCursor: "c2" } }) + "\\n");
+    } else {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { tools: [{ name: "write_file", description: "Write file", inputSchema: { type: "object" } }] } }) + "\\n");
+    }
+  } else if (req.method === "tools/call") {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { ok: true, idType: typeof req.id } }) + "\\n");
+  }
+});
+""".strip(),
+            encoding="utf-8",
+        )
+        probed_node = probe_stdio_mcp_tools(node_bin, [str(node_mcp)], timeout=5.0)
+        assert [tool["name"] for tool in probed_node] == ["read_file", "write_file"]
+
+        # Verify wrap_stdio_mcp preserves string "1" vs integer 1 IDs and forwards notifications
+        cfg = AgentIaCConfig(
+            agent=AgentMeta(id="node-mcp-agent", mode=EnforcementMode.ENFORCE),
+            identity=IdentityConfig(mode=IdentityMode.LOCAL_DEV, require_delegated_sub=False),
+            mcp_servers={
+                "fs-node": MCPServerPolicy(
+                    trust_tier=TrustTier.INTERNAL,
+                    tools={"read_file": ToolPolicy(tier=ToolTier.READ)},
+                )
+            },
+        )
+        client_in = io.StringIO(
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n"
+            + json.dumps({"jsonrpc": "2.0", "id": "1", "method": "tools/call", "params": {"name": "read_file", "arguments": {}}}) + "\n"
+            + json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "read_file", "arguments": {}}}) + "\n"
+        )
+        client_out = io.StringIO()
+        assert wrap_stdio_mcp("fs-node", [node_bin, str(node_mcp)], cfg, None, stdin_stream=client_in, stdout_stream=client_out) == 0
+        resps = [json.loads(line) for line in client_out.getvalue().splitlines() if line.strip()]
+        assert len(resps) == 2
+        assert any(r["id"] == "1" and r["result"]["idType"] == "string" for r in resps)
+        assert any(r["id"] == 1 and r["result"]["idType"] == "number" for r in resps)
+
+    # Non-blocking STDIO timeout safety: hung server must terminate cleanly within timeout
+    hung_script = tmp_path / "hung_mcp.py"
+    hung_script.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+    t0 = time.time()
+    hung_tools = probe_stdio_mcp_tools(sys.executable, [str(hung_script)], timeout=0.6)
+    elapsed = time.time() - t0
+    assert hung_tools == []
+    assert elapsed < 3.5, f"Hung STDIO server blocked probe for {elapsed:.2f}s"
+

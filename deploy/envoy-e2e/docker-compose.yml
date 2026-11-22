@@ -1,0 +1,42 @@
+services:
+  upstream-mcp:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./upstream_mcp.py:/app/upstream_mcp.py:ro
+    command: ["python", "-u", "/app/upstream_mcp.py"]
+    ports:
+      - "19001:9001"
+
+  prometheus-sidecar:
+    build:
+      context: ../../sidecar
+      dockerfile: Dockerfile
+    depends_on:
+      - upstream-mcp
+    environment:
+      PROMETHEUS_LEDGER_SIGNING_KEY: "envoy-e2e-signing-key-32-bytes-minimum"
+    volumes:
+      - ./runtime_policy.json:/etc/prometheus/runtime_policy.json:ro
+      - ./prometheus.lock:/etc/prometheus/prometheus.lock:ro
+    command:
+      - "--policy=/etc/prometheus/runtime_policy.json"
+      - "--lock=/etc/prometheus/prometheus.lock"
+      - "--traces=/tmp/traces.jsonl"
+      - "--addr=0.0.0.0:8080"
+      - "--grpc-addr=0.0.0.0:50051"
+    ports:
+      - "18080:8080"
+      - "50051:50051"
+
+  envoy:
+    image: envoyproxy/envoy:v1.33-latest
+    depends_on:
+      - prometheus-sidecar
+      - upstream-mcp
+    volumes:
+      - ./envoy.yaml:/etc/envoy/envoy.yaml:ro
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "warn"]
+    ports:
+      - "10000:10000"
+      - "19901:9901"

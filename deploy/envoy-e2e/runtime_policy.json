@@ -1,0 +1,57 @@
+{
+  "version": "1",
+  "agent": {
+    "id": "envoy-e2e-billing-agent",
+    "owner": "platform-sec@acme.com",
+    "mode": "enforce"
+  },
+  "identity": {
+    "mode": "oidc_obo",
+    "verify_jwt_signature": true,
+    "allow_trusted_headers": true,
+    "require_delegated_sub": true,
+    "correlate_header": "traceparent"
+  },
+  "local_dev_credentials": {},
+  "mcp_servers": {
+    "billing-third-party": {
+      "url": "http://upstream-mcp:9001/mcp/billing-third-party",
+      "args": [],
+      "trust_tier": "third_party",
+      "strict_unknown_tools": true,
+      "tools": {
+        "refund_invoice": {
+          "tier": "bounded_write",
+          "idempotency_key": "required",
+          "parameter_bounds": {
+            "amount": {
+              "required": true,
+              "min": 0.01,
+              "max": 100.0
+            },
+            "currency": {
+              "required": true,
+              "enum": [
+                "USD",
+                "EUR"
+              ]
+            },
+            "customer_email": {
+              "required": true,
+              "allow_domains": [
+                "acme.com"
+              ]
+            }
+          },
+          "rate_limit": {
+            "max_calls_per_trace": 10,
+            "max_calls_per_hour": 50,
+            "max_sum_per_hour": 1000.0,
+            "sum_parameter": "amount"
+          },
+          "on_bound_exceeded": "mrtr_escalate"
+        }
+      }
+    }
+  }
+}

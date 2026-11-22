@@ -101,12 +101,38 @@ prometheus compile --config prometheus.yaml --out .prometheus/runtime_policy.jso
 
 ---
 
+## Reusable GitHub Action (`prometheus.lock` PR Gate)
+
+Drop MCP manifest rug-pull & Day-1 poisoning gating into any repository in 6 lines of YAML (powered by [action.yml](action.yml)):
+
+```yaml
+- name: Prometheus MCP Lockfile Gate
+  uses: Tony-Stark2025/prometheus-enterprise@v0.3.0
+  with:
+    config: prometheus.yaml
+    lockfile: prometheus.lock
+    probe: "true" # or set `manifest: observed_tools.json`
+```
+
+---
+
 ## Production Envoy / Kubernetes Deployment
 
-Build the standalone static Go sidecar binary or distroless non-root container image (`sidecar/Dockerfile`):
+Deploy into EKS / GKE / AKS with the included **Helm Chart + Envoy Gateway `EnvoyExtensionPolicy` CRD** ([deploy/helm/prometheus-sidecar/](deploy/helm/prometheus-sidecar/)):
 
 ```bash
-# Static binary
+helm install prometheus-sidecar ./deploy/helm/prometheus-sidecar \
+  --set image.repository=ghcr.io/tony-stark2025/prometheus-sidecar \
+  --set secrets.existingSecret=prometheus-sidecar-keys \
+  --set redis.enabled=true \
+  --set redis.addr=redis-master.default.svc.cluster.local:6379 \
+  --set envoyGateway.enabled=true \
+  --set envoyGateway.targetRef.name=mcp-agents-route
+```
+
+Or run the standalone static Go sidecar binary / distroless non-root image (`sidecar/Dockerfile`):
+
+```bash
 cd sidecar
 CGO_ENABLED=0 go build -trimpath -o bin/prometheus-sidecar ./cmd/prometheus-sidecar
 PROMETHEUS_LEDGER_SIGNING_KEY="$(openssl rand -hex 32)" ./bin/prometheus-sidecar \
@@ -114,27 +140,35 @@ PROMETHEUS_LEDGER_SIGNING_KEY="$(openssl rand -hex 32)" ./bin/prometheus-sidecar
   --lock prometheus.lock \
   --traces /var/log/prometheus/traces.jsonl \
   --addr 127.0.0.1:8080 \
-  --grpc-addr 127.0.0.1:50051
+  --grpc-addr 127.0.0.1:50051 \
+  [--redis-addr 127.0.0.1:6379]
+```
 
-# Or distroless non-root Kubernetes image
-docker build -t prometheus-sidecar:latest -f sidecar/Dockerfile sidecar/
+**Real Envoy Proxy v1.33 Wire E2E Harness** ([deploy/envoy-e2e/](deploy/envoy-e2e/)):
+
+```bash
+cd deploy/envoy-e2e
+docker compose up -d --build
+python3 verify_envoy_e2e.py
+docker compose down -v
 ```
 
 Production SRE features built into the Go sidecar:
-- **Official Envoy v3 `ext_proc` + `grpc.health.v1`** on port `50051` (reference Envoy config with gRPC health checks and `2s` `message_timeout` in [sidecar/deploy/envoy-ext-proc.yaml](sidecar/deploy/envoy-ext-proc.yaml)).
-- **Prometheus `/metrics`** exposition (requests, blocks, shadow denies, MRTR escalations, manifest drift, OIDC failures, secret redactions).
+- **Official Envoy v3 `ext_proc` + `grpc.health.v1`** on port `50051` (verified against live Envoy v1.33 in CI on every push).
+- **Optional Redis/Valkey distributed state** (`--redis-addr` / `PROMETHEUS_REDIS_ADDR`) sharing idempotency keys, per-trace counters, and rolling 1-hour per-principal budgets across Kubernetes replicas.
+- **Prometheus `/metrics`** exposition & Prometheus Operator `ServiceMonitor`.
 - **MCP `2026-07-28` Multi-Request Tool Resolution (MRTR)** returning structured `resultType: "input_required"` + HMAC-signed `requestState` approval tokens for human-in-the-loop escalations.
-- **Bounded memory & graceful shutdown**: rolling 1-hour per-principal call/monetary budgets, bounded TTL idempotency/trace caches, 10 MiB payload caps, HTTP server timeouts, and `SIGTERM`/`SIGINT` graceful drain.
+- **Bounded memory & graceful shutdown**: 10 MiB payload caps, HTTP timeouts, non-root distroless image, and `SIGTERM`/`SIGINT` graceful drain.
 
 ---
 
 ## Running All Tests
 
 ```bash
-# Go sidecar unit + race + Envoy v3 gRPC ext_proc + OIDC RS256/ES256 JWKS tests
+# Go sidecar unit + race + Envoy v3 gRPC ext_proc + OIDC RS256/ES256 JWKS + Redis store tests
 (cd sidecar && go test -race -v ./...)
 
-# Python control loop + live MCP probe/wrap + CEL/Cedar export + cross-language Go<->Python suites
+# Python control loop + live MCP probe/wrap (Streamable HTTP + Node.js STDIO) + CEL/Cedar export suites
 pytest tests/test_sprint_abc_hardening_and_probe.py \
        tests/test_sidecar_integration.py \
        tests/test_agent_control_loop_v3.py \

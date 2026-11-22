@@ -1,0 +1,14 @@
+apiVersion: v2
+name: prometheus-sidecar
+description: Prometheus Agent Control Loop — Envoy v3 gRPC ext_proc & MCP Governance Sidecar
+type: application
+version: 0.3.0
+appVersion: "0.3.0"
+keywords:
+  - mcp
+  - ai-agents
+  - envoy
+  - ext-proc
+  - security
+  - governance
+home: https://github.com/Tony-Stark2025/prometheus-enterprise

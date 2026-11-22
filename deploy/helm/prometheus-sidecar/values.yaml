@@ -1,0 +1,76 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/tony-stark2025/prometheus-sidecar
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  grpcPort: 50051
+
+# Mount compiled runtime_policy.json and prometheus.lock from an existing ConfigMap
+# or inline them below via `config.inline`.
+config:
+  existingConfigMap: ""
+  inline:
+    runtimePolicyJson: |
+      {
+        "agent": { "id": "default-agent", "owner": "platform-sec@example.com", "mode": "shadow" },
+        "identity": { "mode": "oidc_obo", "require_delegated_sub": true, "verify_jwt_signature": true },
+        "mcp_servers": {}
+      }
+    prometheusLockJson: |
+      {
+        "version": "1",
+        "servers": {}
+      }
+
+# Required in `mode: enforce` — reference a Kubernetes Secret containing:
+#   PROMETHEUS_LEDGER_SIGNING_KEY (32+ bytes hex)
+#   PROMETHEUS_TOKENIZER_KEY      (optional 32+ bytes hex)
+#   PROMETHEUS_REDIS_PASSWORD     (optional if Redis requires AUTH)
+secrets:
+  existingSecret: ""
+  ledgerSigningKey: ""
+  tokenizerKey: ""
+
+# Optional shared Redis/Valkey for multi-replica rolling 1h budgets & idempotency
+redis:
+  enabled: false
+  addr: "redis-master.default.svc.cluster.local:6379"
+
+# Envoy Gateway `EnvoyExtensionPolicy` CRD (wiring Envoy ext_proc -> prometheus-sidecar:50051)
+envoyGateway:
+  enabled: true
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: mcp-agents-route
+  failOpen: false
+  messageTimeout: "2s"
+
+# Prometheus Operator ServiceMonitor for `/metrics`
+serviceMonitor:
+  enabled: false
+  interval: 15s
+  scrapeTimeout: 5s
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi

@@ -1,106 +1,85 @@
-name: "Prometheus Enterprise Autonomous AppSec & Patch Gate"
-description: "In-VPC Glass-Box API Exploit Verification, 3-Tier PoV/Triage Disposition, CEGIS Auto-Patching, and Coding-Agent Supply-Chain Firewall."
-author: "Prometheus Enterprise"
-
+name: "Prometheus MCP Lockfile & Poisoning Gate"
+description: "Diff-governed MCP manifest pinning (`prometheus.lock`), Day-1 prompt-injection linting, and cross-server tool shadowing PR gate."
 branding:
   icon: "shield"
-  color: "red"
+  color: "orange"
 
 inputs:
-  mode:
-    description: "Execution mode: 'pentest' (live API + Glass-Box PR gate) or 'immunology' (lockfile + AST reachability + GitSpawn/Plugin4Shell scan)"
+  config:
+    description: "Path to prometheus.yaml"
     required: false
-    default: "pentest"
-  target-url:
-    description: "Target preview/staging API base URL (used in 'pentest' mode)"
+    default: "prometheus.yaml"
+  lockfile:
+    description: "Path to prometheus.lock"
     required: false
-    default: "http://127.0.0.1:8000"
-  spec-url:
-    description: "OpenAPI schema URL or relative path"
-    required: false
-    default: "/openapi.json"
-  target-dir:
-    description: "Repository directory for Glass-Box AST reachability, Route-to-CVE mapping, and SWE patch synthesis"
-    required: false
-    default: "."
-  app-cmd:
-    description: "Optional command to boot the target application before scanning"
+    default: "prometheus.lock"
+  manifest:
+    description: "Path to observed MCP tools/list JSON manifest (optional when probe=true)"
     required: false
     default: ""
-  fail-on-exploit:
-    description: "Exit with code 1 if any Tier A Verified PoV is confirmed"
+  probe:
+    description: "Set to 'true' to probe live HTTP/SSE and STDIO MCP servers declared in prometheus.yaml"
     required: false
-    default: "true"
-  output-sarif:
-    description: "Output file path for SARIF v2.1.0 report"
+    default: "false"
+  probe-timeout:
+    description: "Per-server probe timeout in seconds when probe=true"
     required: false
-    default: "prometheus-results.sarif"
-  output-markdown:
-    description: "Output file path for Staff-Engineer Markdown PR report"
+    default: "8"
+  python-version:
+    description: "Python version to use for running Prometheus CLI"
     required: false
-    default: "prometheus-report.md"
-  output-diff:
-    description: "Output file path for compiler-verified unified git diff"
-    required: false
-    default: "prometheus-fix.patch"
+    default: "3.11"
 
 outputs:
-  sarif-file:
-    description: "Path to generated SARIF report"
-    value: ${{ inputs.output-sarif }}
-  markdown-file:
-    description: "Path to generated Markdown PR report"
-    value: ${{ inputs.output-markdown }}
-  diff-file:
-    description: "Path to generated unified git diff patch"
-    value: ${{ inputs.output-diff }}
+  exit-code:
+    description: "Exit code returned by `prometheus lock --diff` (0=pass, 1=blocked)"
+    value: ${{ steps.lock_gate.outputs.exit_code }}
 
 runs:
   using: "composite"
   steps:
-    - name: Set up Python 3.12
+    - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: "3.12"
-        cache: "pip"
-        cache-dependency-path: "${{ github.action_path }}/requirements-cli.txt"
+        python-version: ${{ inputs.python-version }}
 
-    - name: Install Prometheus Runner Dependencies
+    - name: Install Prometheus CLI
       shell: bash
       run: |
-        python -m pip install --upgrade pip
-        pip install -r "${{ github.action_path }}/requirements-cli.txt"
+        python -m pip install --upgrade pip >/dev/null
+        pip install --quiet "${{ github.action_path }}"
 
-    - name: Execute Prometheus Security Gate
+    - name: Run Prometheus MCP Lockfile Diff & Poisoning Gate
+      id: lock_gate
       shell: bash
-      env:
-        PYTHONPATH: ${{ github.action_path }}
       run: |
-        if [ "${{ inputs.mode }}" = "immunology" ]; then
-          python -m prometheus.cli_scan --immunology --target-dir "${{ inputs.target-dir }}" | tee prometheus-immunology.json
-          if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            echo "## 🛡️ Prometheus Continuous Immunology & Agentic Supply-Chain Report" >> "$GITHUB_STEP_SUMMARY"
-            echo '```json' >> "$GITHUB_STEP_SUMMARY"
-            head -n 80 prometheus-immunology.json >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
-          fi
+        set +e
+        CMD=(prometheus lock --config "${{ inputs.config }}" --lockfile "${{ inputs.lockfile }}" --diff)
+        if [ "${{ inputs.probe }}" = "true" ]; then
+          CMD+=(--probe --probe-timeout "${{ inputs.probe-timeout }}")
+        elif [ -n "${{ inputs.manifest }}" ]; then
+          CMD+=(--manifest "${{ inputs.manifest }}")
         else
-          ARGS=(
-            "--target-url" "${{ inputs.target-url }}"
-            "--spec-url" "${{ inputs.spec-url }}"
-            "--target-dir" "${{ inputs.target-dir }}"
-            "--output-sarif" "${{ inputs.output-sarif }}"
-            "--output-markdown" "${{ inputs.output-markdown }}"
-            "--output-diff" "${{ inputs.output-diff }}"
-          )
-          if [ -n "${{ inputs.app-cmd }}" ]; then
-            ARGS+=("--app-cmd" "${{ inputs.app-cmd }}")
-          fi
-          if [ "${{ inputs.fail-on-exploit }}" = "true" ]; then
-            ARGS+=("--fail-on-exploit")
-          fi
-          python -m prometheus.cli_scan "${ARGS[@]}"
-          if [ -f "${{ inputs.output-markdown }}" ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            cat "${{ inputs.output-markdown }}" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "::error::Prometheus Lockfile Gate requires either input 'manifest' or 'probe: true'."
+          exit 2
         fi
+
+        OUTPUT="$("${CMD[@]}" 2>&1)"
+        RC=$?
+        echo "exit_code=${RC}" >> "${GITHUB_OUTPUT}"
+        echo "${OUTPUT}"
+
+        {
+          echo "## Prometheus MCP Lockfile Gate"
+          if [ "${RC}" -eq 0 ]; then
+            echo "**Status:** PASSED"
+          else
+            echo "**Status:** BLOCKED (exit ${RC})"
+          fi
+          echo ""
+          echo '```text'
+          echo "${OUTPUT}"
+          echo '```'
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+        exit "${RC}"
