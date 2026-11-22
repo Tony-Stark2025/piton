@@ -54,7 +54,7 @@ def wait_for_ready():
                     code, _ = post_json(
                         ENVOY_URL,
                         {"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}},
-                        {"X-Authenticated-User": "alice@acme.com"},
+                        {"X-Forwarded-User": "alice@acme.com"},
                     )
                     if code == 200:
                         return
@@ -77,7 +77,7 @@ def sign_mrtr_approval(request_state: str) -> str:
 def main():
     wait_for_ready()
     base_headers = {
-        "X-Authenticated-User": "alice@acme.com",
+        "X-Forwarded-User": "alice@acme.com",
         "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
     }
 
