@@ -252,9 +252,101 @@ def _cmd_compile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _detect_sidecar_asset_name() -> Optional[str]:
+    import platform
+
+    sys_os = platform.system().lower()
+    if sys_os not in ("linux", "darwin"):
+        return None
+    mach = platform.machine().lower()
+    arch_map = {
+        "x86_64": "amd64",
+        "amd64": "amd64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }
+    goarch = arch_map.get(mach)
+    if not goarch:
+        return None
+    return f"prometheus-sidecar-{sys_os}-{goarch}"
+
+
+def _download_verified_sidecar_binary(
+    version: Optional[str] = None,
+    cache_dir: Optional[Path] = None,
+    base_url: Optional[str] = None,
+) -> Optional[Path]:
+    """
+    Downloads the matching static `prometheus-sidecar` binary from GitHub Releases (or
+    `PROMETHEUS_SIDECAR_RELEASE_URL` enterprise mirror), verifies its SHA-256 digest
+    against `checksums.txt` (failing closed on mismatch), and caches it locally.
+    """
+    import hashlib
+    from prometheus import __version__
+
+    ver = version or __version__
+    asset = _detect_sidecar_asset_name()
+    if not asset:
+        return None
+
+    target_dir = cache_dir or (Path.home() / ".prometheus" / "bin")
+    cached = target_dir / f"{asset}-v{ver}"
+    if cached.is_file() and os.access(cached, os.X_OK):
+        return cached
+
+    release_base = (
+        base_url
+        or os.getenv("PROMETHEUS_SIDECAR_RELEASE_URL")
+        or f"https://github.com/Tony-Stark2025/prometheus-enterprise/releases/download/v{ver}"
+    ).rstrip("/")
+
+    checksums_url = f"{release_base}/checksums.txt"
+    binary_url = f"{release_base}/{asset}"
+
+    try:
+        with urllib.request.urlopen(checksums_url, timeout=15) as resp:
+            checksums_raw = resp.read(256 * 1024).decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    expected_sha: Optional[str] = None
+    for line in checksums_raw.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and Path(parts[1]).name == asset:
+            expected_sha = parts[0].lower()
+            break
+    if not expected_sha or len(expected_sha) != 64:
+        return None
+
+    try:
+        with urllib.request.urlopen(binary_url, timeout=60) as resp:
+            data = resp.read(64 * 1024 * 1024)
+    except Exception:
+        return None
+
+    actual_sha = hashlib.sha256(data).hexdigest().lower()
+    if actual_sha != expected_sha:
+        print(
+            f"Error: SHA-256 verification failed for {asset} (expected {expected_sha[:16]}..., got {actual_sha[:16]}...). Refusing to execute.",
+            file=sys.stderr,
+        )
+        return None
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    tmp_path = cached.with_suffix(".tmp")
+    tmp_path.write_bytes(data)
+    tmp_path.chmod(0o755)
+    tmp_path.replace(cached)
+    return cached
+
+
 def _resolve_sidecar_binary(explicit_bin: Optional[str]) -> Optional[Path]:
     if explicit_bin:
         p = Path(explicit_bin)
+        return p if p.is_file() else None
+    env_bin = os.getenv("PROMETHEUS_SIDECAR_BIN")
+    if env_bin:
+        p = Path(env_bin)
         return p if p.is_file() else None
     found = shutil.which("prometheus-sidecar")
     if found:
@@ -273,7 +365,7 @@ def _resolve_sidecar_binary(explicit_bin: Optional[str]) -> Optional[Path]:
         )
         if res.returncode == 0 and local_bin.is_file():
             return local_bin
-    return None
+    return _download_verified_sidecar_binary()
 
 
 def _load_dotenv(path: Path) -> Dict[str, str]:

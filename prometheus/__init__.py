@@ -1,5 +1,5 @@
 """
-Prometheus Enterprise: Autonomous API Penetration Testing & Runtime Capability Hypervisor.
+Prometheus — The Agent Control Loop (MCP Manifest Pinning, Shadow-to-Enforce Replay & Envoy ext_proc Sidecar).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"

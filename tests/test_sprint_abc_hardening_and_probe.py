@@ -482,3 +482,59 @@ rl.on("line", (line) => {
     assert hung_tools == []
     assert elapsed < 3.5, f"Hung STDIO server blocked probe for {elapsed:.2f}s"
 
+
+def test_sidecar_binary_auto_download_verifies_sha256_and_rejects_tampering(tmp_path: Path):
+    import hashlib
+    import os
+    from prometheus.cli import _detect_sidecar_asset_name, _download_verified_sidecar_binary
+
+    asset = _detect_sidecar_asset_name()
+    assert asset is not None and asset.startswith("prometheus-sidecar-")
+
+    good_bytes = b"#!/bin/sh\necho ok\n"
+    good_sha = hashlib.sha256(good_bytes).hexdigest()
+    state = {"tamper": False}
+
+    class ReleaseMirrorHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            return
+
+        def do_GET(self):
+            if self.path == "/checksums.txt":
+                body = f"{good_sha}  {asset}\n".encode("utf-8")
+            elif self.path == f"/{asset}":
+                body = b"TAMPERED_MALICIOUS_BINARY" if state["tamper"] else good_bytes
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    httpd = HTTPServer(("127.0.0.1", 0), ReleaseMirrorHandler)
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        base_url = f"http://127.0.0.1:{port}"
+
+        # 1. Tampered binary MUST be rejected fail-closed
+        state["tamper"] = True
+        tampered_cache = tmp_path / "cache_tampered"
+        assert _download_verified_sidecar_binary(version="0.3.0", cache_dir=tampered_cache, base_url=base_url) is None
+        assert not (tampered_cache / f"{asset}-v0.3.0").exists()
+
+        # 2. Valid SHA-256 binary downloads, verifies, and caches with +x permissions
+        state["tamper"] = False
+        good_cache = tmp_path / "cache_good"
+        installed = _download_verified_sidecar_binary(version="0.3.0", cache_dir=good_cache, base_url=base_url)
+        assert installed is not None and installed.is_file()
+        assert os.access(installed, os.X_OK)
+        assert installed.read_bytes() == good_bytes
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
