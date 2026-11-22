@@ -154,7 +154,7 @@ def main():
     # 6. Check sidecar /metrics exposition
     with urllib.request.urlopen(SIDECAR_METRICS, timeout=3) as r:
         metrics_text = r.read().decode("utf-8")
-        assert "prometheus_sidecar_rugpulls_blocked_total 1" in metrics_text, f"Missing rugpull metric:\n{metrics_text}"
+        assert "prometheus_sidecar_rug_pulls_blocked_total 1" in metrics_text, f"Missing rugpull metric:\n{metrics_text}"
         assert "prometheus_sidecar_mrtr_escalated_total 1" in metrics_text, f"Missing MRTR metric:\n{metrics_text}"
     print("[PASS] 6. Sidecar /metrics accurately recorded rug-pull block and MRTR escalation")
 
