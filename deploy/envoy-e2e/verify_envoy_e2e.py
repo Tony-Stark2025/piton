@@ -139,7 +139,7 @@ def main():
         {
             **base_headers,
             "Idempotency-Key": "envoy-e2e-mrtr-1",
-            "X-Prometheus-Approval-Token": approval_token,
+            "X-Prometheus-MRTR-Approval": approval_token,
         },
     )
     assert code == 200 and "content" in body.get("result", {}), f"Approved MRTR retry failed: {code} {body}"
