@@ -17,9 +17,12 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional
+import urllib.request
 
 from prometheus.iac.lockfile import (
     build_lockfile_from_servers,
@@ -193,6 +196,129 @@ def _cmd_top(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_compile(args: argparse.Namespace) -> int:
+    config = AgentIaCConfig.load_file(Path(args.config))
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(config.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print(f"Compiled {args.config} -> {out_path} (policy_sha256={config.canonical_sha256()[:16]}...)")
+    return 0
+
+
+def _resolve_sidecar_binary(explicit_bin: Optional[str]) -> Optional[Path]:
+    if explicit_bin:
+        p = Path(explicit_bin)
+        return p if p.is_file() else None
+    found = shutil.which("prometheus-sidecar")
+    if found:
+        return Path(found)
+    repo_sidecar = Path(__file__).resolve().parent.parent / "sidecar"
+    local_bin = repo_sidecar / "bin" / "prometheus-sidecar"
+    if local_bin.is_file():
+        return local_bin
+    if shutil.which("go") and (repo_sidecar / "cmd" / "prometheus-sidecar" / "main.go").is_file():
+        local_bin.parent.mkdir(parents=True, exist_ok=True)
+        res = subprocess.run(
+            ["go", "build", "-o", str(local_bin), "./cmd/prometheus-sidecar"],
+            cwd=str(repo_sidecar),
+            capture_output=True,
+            text=True,
+        )
+        if res.returncode == 0 and local_bin.is_file():
+            return local_bin
+    return None
+
+
+def _load_dotenv(path: Path) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    if not path.is_file():
+        return out
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    cmd = list(args.cmd or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        print("Error: provide an agent command after `--`, e.g. `prometheus run -- python agent.py`", file=sys.stderr)
+        return 2
+
+    config_path = Path(args.config)
+    config = AgentIaCConfig.load_file(config_path)
+    compiled_path = Path(args.compiled_policy)
+    compiled_path.parent.mkdir(parents=True, exist_ok=True)
+    compiled_path.write_text(
+        json.dumps(config.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    sidecar_bin = _resolve_sidecar_binary(args.sidecar_bin)
+    if sidecar_bin is None:
+        print("Error: prometheus-sidecar binary not found and `go` toolchain unavailable.", file=sys.stderr)
+        return 1
+
+    # Host process (sidecar) inherits real secrets; child agent process receives ONLY ghost handles!
+    sidecar_cmd = [
+        str(sidecar_bin),
+        "--policy", str(compiled_path),
+        "--lock", str(args.lockfile),
+        "--traces", str(args.traces),
+        "--ghost-env", str(args.ghost_env),
+        "--addr", str(args.addr),
+    ]
+    sidecar_proc = subprocess.Popen(sidecar_cmd, env=os.environ.copy())
+
+    try:
+        # Wait up to 5s for /healthz
+        health_url = f"http://{args.addr}/healthz"
+        ready = False
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(health_url, timeout=0.2) as resp:
+                    if resp.status == 200:
+                        ready = True
+                        break
+            except Exception:
+                time.sleep(0.1)
+        if not ready:
+            print(f"Error: prometheus-sidecar failed to become healthy at {health_url}", file=sys.stderr)
+            return 1
+
+        # Build scrubbed child environment: strip every real secret referenced in local_dev_credentials
+        child_env = os.environ.copy()
+        for slot in config.local_dev_credentials.values():
+            if slot.source.startswith("env://"):
+                real_var = slot.source[len("env://") :]
+                child_env.pop(real_var, None)
+
+        # Inject safe format-preserving ghost handles + gateway base URLs from .env.agent
+        ghost_vars = _load_dotenv(Path(args.ghost_env))
+        for k, v in ghost_vars.items():
+            if k.endswith("_BASE_URL") and "127.0.0.1" not in v and "localhost:8080" in v:
+                v = v.replace("localhost:8080", args.addr)
+            child_env[k] = v
+        child_env["PROMETHEUS_GATEWAY_URL"] = f"http://{args.addr}"
+
+        res = subprocess.run(cmd, env=child_env)
+        return int(res.returncode)
+    finally:
+        sidecar_proc.terminate()
+        try:
+            sidecar_proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            sidecar_proc.kill()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="prometheus",
@@ -207,6 +333,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--manifest", default=None, help="Optional JSON file mapping server_name -> tools/list array")
     p_init.add_argument("--allow-poisoned", action="store_true", help="Include tools even if poisoning lint flags them")
     p_init.set_defaults(func=_cmd_init)
+
+    p_compile = sub.add_parser("compile", help="Compile prometheus.yaml into .prometheus/runtime_policy.json for Go sidecar")
+    p_compile.add_argument("--config", default="prometheus.yaml")
+    p_compile.add_argument("--out", default=".prometheus/runtime_policy.json")
+    p_compile.set_defaults(func=_cmd_compile)
+
+    p_run = sub.add_parser("run", help="Boot zero-secret Go sidecar, scrub real env secrets, inject .env.agent, and run agent")
+    p_run.add_argument("--config", default="prometheus.yaml")
+    p_run.add_argument("--lockfile", default="prometheus.lock")
+    p_run.add_argument("--ghost-env", default=".env.agent")
+    p_run.add_argument("--traces", default=".prometheus/traces.jsonl")
+    p_run.add_argument("--compiled-policy", default=".prometheus/runtime_policy.json")
+    p_run.add_argument("--addr", default="127.0.0.1:8080")
+    p_run.add_argument("--sidecar-bin", default=None)
+    p_run.add_argument("cmd", nargs=argparse.REMAINDER, help="Command to run (prefix with --)")
+    p_run.set_defaults(func=_cmd_run)
 
     p_lock = sub.add_parser("lock", help="Verify, diff, or update prometheus.lock MCP pins")
     p_lock.add_argument("--manifest", required=True, help="JSON file mapping server_name -> observed tools/list array")

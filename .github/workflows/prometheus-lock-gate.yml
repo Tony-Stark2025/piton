@@ -1,0 +1,30 @@
+name: Prometheus MCP Manifest Lock Gate
+
+on:
+  pull_request:
+    paths:
+      - "prometheus.yaml"
+      - "prometheus.lock"
+      - ".cursor/mcp.json"
+      - ".mcp.json"
+      - "mcp.json"
+      - "**/mcp_manifest*.json"
+
+jobs:
+  mcp-lock-diff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Prometheus CLI
+        run: pip install -e .
+      - name: Verify MCP Manifest Lockfile (Split Structural / Description Pin)
+        if: hashFiles('observed_mcp_manifest.json') != ''
+        run: |
+          prometheus lock \
+            --config prometheus.yaml \
+            --lockfile prometheus.lock \
+            --manifest observed_mcp_manifest.json \
+            --diff

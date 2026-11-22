@@ -1,0 +1,43 @@
+# Reference Envoy / agentgateway deployment template wiring Prometheus as a
+# bidirectional ext_proc / ExtMcp sidecar (request bounds + response tools/list pinning & scrubbing).
+static_resources:
+  clusters:
+    - name: prometheus_sidecar
+      type: STRICT_DNS
+      connect_timeout: 0.25s
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: prometheus_sidecar
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: 127.0.0.1
+                      port_value: 8080
+  listeners:
+    - name: mcp_ingress
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 10000
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: prometheus_mcp
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: mcp_backends
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/mcp/" }
+                          route: { cluster: prometheus_sidecar }
+                        - match: { prefix: "/gw/" }
+                          route: { cluster: prometheus_sidecar }
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
