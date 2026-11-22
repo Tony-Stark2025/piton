@@ -54,6 +54,12 @@ class AgentMeta(BaseModel):
 class IdentityConfig(BaseModel):
     mode: IdentityMode = Field(default=IdentityMode.OIDC_OBO)
     issuer: Optional[str] = Field(default=None, description="OIDC issuer URL (Okta / Entra / Auth0)")
+    jwks_url: Optional[str] = Field(default=None, description="Explicit JWKS URL (auto-discovered from issuer if omitted)")
+    audience: Optional[str] = Field(default=None, description="Expected JWT aud claim")
+    verify_jwt_signature: bool = Field(
+        default=False,
+        description="When true (or when jwks_url/issuer is set with enforce), cryptographically verify RS256/ES256 JWTs via JWKS",
+    )
     require_delegated_sub: bool = Field(
         default=True,
         description="Require OBO user+agent principal claims in production enforce mode",

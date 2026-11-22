@@ -2,6 +2,7 @@ package policy
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/oidc"
 )
 
 // Policy structures mirror `prometheus/iac/schema.py` 1:1 so compiled runtime_policy.json
@@ -29,6 +32,9 @@ type AgentMeta struct {
 type IdentityConfig struct {
 	Mode                string `json:"mode"` // "oidc_obo" | "local_dev"
 	Issuer              string `json:"issuer,omitempty"`
+	JWKSURL             string `json:"jwks_url,omitempty"`
+	Audience            string `json:"audience,omitempty"`
+	VerifyJWTSignature  bool   `json:"verify_jwt_signature"`
 	RequireDelegatedSub bool   `json:"require_delegated_sub"`
 	CorrelateHeader     string `json:"correlate_header"`
 }
@@ -144,6 +150,7 @@ type Engine struct {
 	Lockfile       *ManifestLockfile
 	PolicySHA256   string
 	LockfileSHA256 string
+	OIDCVerifier   *oidc.Verifier
 
 	ledgerPath    string
 	signingKey    []byte
@@ -181,11 +188,21 @@ func NewEngine(cfg AgentIaCConfig, lock *ManifestLockfile, ledgerPath string, si
 		lockSHA = hex.EncodeToString(ls[:])
 	}
 
+	var verifier *oidc.Verifier
+	if cfg.Identity.VerifyJWTSignature || cfg.Identity.JWKSURL != "" {
+		verifier = oidc.NewVerifier(oidc.VerifierConfig{
+			Issuer:   cfg.Identity.Issuer,
+			JWKSURL:  cfg.Identity.JWKSURL,
+			Audience: cfg.Identity.Audience,
+		})
+	}
+
 	eng := &Engine{
 		Config:         cfg,
 		Lockfile:       lock,
 		PolicySHA256:   hex.EncodeToString(policySum[:]),
 		LockfileSHA256: lockSHA,
+		OIDCVerifier:   verifier,
 		ledgerPath:     ledgerPath,
 		signingKey:     signingKey,
 		tokenizerKey:   tokenizerKey,
@@ -244,8 +261,28 @@ func LoadLockfile(path string) (*ManifestLockfile, error) {
 	return &lock, nil
 }
 
-// ExtractOBOPrincipal extracts user+agent principal from either trusted IdP proxy headers
-// (X-OBO-Principal / X-Forwarded-User) or an OIDC/OAuth2 Bearer JWT (`sub` + optional `act.sub`).
+// ResolveOBOPrincipal resolves the caller's OBO identity.
+// When cryptographic OIDC/JWKS verification is enabled (`VerifyJWTSignature` or `JWKSURL` set),
+// it strictly verifies the Bearer JWT via RS256/ES256 JWKS and fails closed on missing/forged tokens
+// (never trusting spoofable `X-OBO-Principal` headers).
+func (e *Engine) ResolveOBOPrincipal(ctx context.Context, hdr http.Header) string {
+	if e.OIDCVerifier != nil {
+		auth := strings.TrimSpace(hdr.Get("Authorization"))
+		if !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			return ""
+		}
+		rawTok := strings.TrimSpace(auth[7:])
+		principal, err := e.OIDCVerifier.VerifyToken(ctx, rawTok)
+		if err != nil || principal == nil {
+			return ""
+		}
+		return principal.CanonicalID
+	}
+	return ExtractOBOPrincipal(hdr)
+}
+
+// ExtractOBOPrincipal extracts user+agent principal from trusted upstream IdP gateway headers
+// (X-OBO-Principal / X-Forwarded-User) or an OAuth2 Bearer JWT when signature verification is delegated upstream.
 func ExtractOBOPrincipal(hdr http.Header) string {
 	if v := strings.TrimSpace(hdr.Get("X-OBO-Principal")); v != "" {
 		return v

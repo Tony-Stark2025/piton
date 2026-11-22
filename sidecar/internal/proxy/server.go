@@ -89,7 +89,7 @@ func resolveSecret(source string) (string, error) {
 	return "", fmt.Errorf("unsupported secret source scheme: %s", source)
 }
 
-func (s *Server) activeSecrets() []string {
+func (s *Server) ActiveSecrets() []string {
 	var out []string
 	for _, slot := range s.Engine.Config.LocalDevCredentials {
 		if sec, err := resolveSecret(slot.Source); err == nil && sec != "" {
@@ -97,6 +97,10 @@ func (s *Server) activeSecrets() []string {
 		}
 	}
 	return out
+}
+
+func (s *Server) activeSecrets() []string {
+	return s.ActiveSecrets()
 }
 
 // ============================================================================
@@ -329,7 +333,7 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	if traceparent == "" {
 		traceparent = fmt.Sprintf("00-%016x-01", time.Now().UnixNano())
 	}
-	oboPrincipal := policy.ExtractOBOPrincipal(r.Header)
+	oboPrincipal := s.Engine.ResolveOBOPrincipal(r.Context(), r.Header)
 	idemKey := r.Header.Get("Idempotency-Key")
 
 	// Request phase: evaluate parameter bounds & OBO identity for tools/call
@@ -484,7 +488,7 @@ func (s *Server) handleExtBidirectional(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Default: request phase
-	obo := policy.ExtractOBOPrincipal(hdr)
+	obo := s.Engine.ResolveOBOPrincipal(r.Context(), hdr)
 	ev := s.Engine.EvaluateToolCall(traceparent, req.ServerName, req.ToolName, req.Arguments, obo, req.IdempotencyKey)
 	latMs := float64(time.Since(start).Microseconds()) / 1000.0
 	rec, _ := s.Engine.AppendLedgerRecord(traceparent, req.ServerName, req.ToolName, req.Arguments, ev, obo, req.IdempotencyKey, latMs)

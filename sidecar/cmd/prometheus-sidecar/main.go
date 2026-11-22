@@ -4,10 +4,15 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
 
+	ext_procv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+	"google.golang.org/grpc"
+
+	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/extproc"
 	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/policy"
 	"github.com/Tony-Stark2025/prometheus-enterprise/sidecar/internal/proxy"
 )
@@ -46,7 +51,8 @@ func main() {
 	lockPath := flag.String("lock", "prometheus.lock", "Path to prometheus.lock")
 	tracesPath := flag.String("traces", ".prometheus/traces.jsonl", "Path to signed JSONL decision ledger")
 	ghostEnvPath := flag.String("ghost-env", ".env.agent", "Optional path to .env.agent ghost handles")
-	addr := flag.String("addr", "127.0.0.1:8080", "Listen address")
+	addr := flag.String("addr", "127.0.0.1:8080", "HTTP listen address (/gw, /mcp, /ext_mcp, /healthz)")
+	grpcAddr := flag.String("grpc-addr", "", "Optional Envoy v3 gRPC ext_proc listen address (e.g. 127.0.0.1:50051)")
 	flag.Parse()
 
 	cfg, err := policy.LoadConfigFile(*policyPath)
@@ -71,11 +77,26 @@ func main() {
 	}
 
 	ghosts := parseGhostEnvFile(*ghostEnvPath, cfg)
-	srv := proxy.NewServer(eng, ghosts)
+	httpSrv := proxy.NewServer(eng, ghosts)
 
-	fmt.Printf("prometheus-sidecar listening on http://%s (agent=%s mode=%s policy_sha=%s)\n",
-		*addr, cfg.Agent.ID, cfg.Agent.Mode, eng.PolicySHA256[:12])
-	if err := http.ListenAndServe(*addr, srv); err != nil {
+	if *grpcAddr != "" {
+		lis, err := net.Listen("tcp", *grpcAddr)
+		if err != nil {
+			log.Fatalf("failed to bind Envoy gRPC ext_proc on %s: %v", *grpcAddr, err)
+		}
+		grpcServer := grpc.NewServer()
+		ext_procv3.RegisterExternalProcessorServer(grpcServer, extproc.NewServer(eng, httpSrv.ActiveSecrets))
+		go func() {
+			fmt.Printf("prometheus-sidecar Envoy gRPC ext_proc listening on %s\n", *grpcAddr)
+			if err := grpcServer.Serve(lis); err != nil {
+				log.Fatalf("gRPC ext_proc exited: %v", err)
+			}
+		}()
+	}
+
+	fmt.Printf("prometheus-sidecar HTTP listening on http://%s (agent=%s mode=%s policy_sha=%s oidc_jwks=%v)\n",
+		*addr, cfg.Agent.ID, cfg.Agent.Mode, eng.PolicySHA256[:12], eng.OIDCVerifier != nil)
+	if err := http.ListenAndServe(*addr, httpSrv); err != nil {
 		log.Fatalf("sidecar exited: %v", err)
 	}
 }
