@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "piton"
-version = "0.3.0"
+version = "0.4.0"
 description = "Piton — The package-lock.json & supply-chain firewall for AI coding agents (split-hash MCP pinning, Claude/Cursor hook RCE linting, shadow replay -> CEL/Cedar & Envoy v3 ext_proc sidecar)"
 readme = "README.md"
 requires-python = ">=3.10"
