@@ -17,7 +17,11 @@ Every AI coding agent (`Claude Code`, `Cursor`, `Claude Desktop`, `OpenCode`) no
 Slim Python CLI — **only 2 runtime dependencies (`pydantic` + `pyyaml`)**:
 
 ```bash
-pip install "git+https://github.com/Tony-Stark2025/piton.git@v0.4.1"
+# Zero-install instant scan (works anywhere with uv):
+uvx piton-cli scan --repo .
+
+# Or install permanently via pipx / pip:
+pipx install piton-cli   # or: pip install piton-cli
 
 # 1. Zero-config scan: catches .claude/settings.json hook RCE, .vscode/tasks.json folderOpen autorun,
 #    malicious STDIO MCP commands, and hidden-Unicode / prompt-injection poisoning in .cursor/rules & CLAUDE.md
@@ -35,7 +39,7 @@ piton wrap --enforce --server github -- npx -y @modelcontextprotocol/server-gith
 
 ```yaml
 - name: Piton — AI Agent Supply-Chain & MCP Lockfile Gate
-  uses: Tony-Stark2025/piton@v0.4.1
+  uses: Tony-Stark2025/piton@v0.4.2
   with:
     scan-only: "true" # or `probe: "true"` / `manifest: observed_tools.json` for MCP lockfile diffs
 ```

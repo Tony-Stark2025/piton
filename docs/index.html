@@ -78,10 +78,15 @@
 
     <div class="cta-row">
       <a class="btn btn-primary" href="https://github.com/Tony-Stark2025/piton">View on GitHub</a>
-      <a class="btn btn-secondary" href="https://github.com/Tony-Stark2025/piton/releases/tag/v0.4.1">Download v0.4.1</a>
+      <a class="btn btn-secondary" href="https://pypi.org/project/piton-cli/">PyPI (piton-cli)</a>
+      <a class="btn btn-secondary" href="https://github.com/Tony-Stark2025/piton/releases/tag/v0.4.2">Release v0.4.2</a>
     </div>
 
-    <pre><code>pip install "git+https://github.com/Tony-Stark2025/piton.git@v0.4.1"
+    <pre><code># Zero-install instant scan:
+uvx piton-cli scan --repo .
+
+# Or install via pipx / pip:
+pipx install piton-cli   # or: pip install piton-cli
 
 # 1. Scan repo for Claude Code hook RCE, VS Code folderOpen tasks &amp; poisoned rules
 piton scan --repo .
@@ -111,12 +116,12 @@ piton wrap --enforce --server github -- npx -y @modelcontextprotocol/server-gith
 
     <h2>Drop Into GitHub Actions</h2>
     <pre><code>- name: Piton — AI Agent Supply-Chain &amp; MCP Lockfile Gate
-  uses: Tony-Stark2025/piton@v0.4.1
+  uses: Tony-Stark2025/piton@v0.4.2
   with:
     scan-only: "true" # or probe: "true" to also diff live MCP manifests</code></pre>
 
     <footer>
-      <span>Piton v0.4.1 &middot; MIT License</span>
+      <span>Piton v0.4.2 &middot; MIT License</span>
       <span><a href="https://github.com/Tony-Stark2025/piton">github.com/Tony-Stark2025/piton</a></span>
     </footer>
   </div>
