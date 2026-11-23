@@ -60,7 +60,7 @@ POISONING_RULES: Tuple[Tuple[str, LintSeverity, str, str], ...] = (
     (
         "MCP_POISON_CREDENTIAL_EXFIL",
         LintSeverity.CRITICAL,
-        r"(~/\.ssh|id_rsa|id_ed25519|/etc/passwd|\.aws/credentials|\.env\b|exfiltrat|webhook\.site|ngrok\.io|blind\s+carbon\s+copy|\bbcc\b\s+[^\s]{1,80}@|pass\s+(all|the)\s+(api\s+keys?|secrets?|tokens?|credentials?))",
+        r"(~/\.ssh|id_rsa|id_ed25519|/etc/passwd|\.aws/credentials|\.env\b|\bexfiltrat\w*\b|webhook\.site|ngrok\.io|blind\s+carbon\s+copy|\bbcc\b\s+[^\s]{1,80}@|pass\s+(all|the)\s+(api\s+keys?|secrets?|tokens?|credentials?))",
         "Tool metadata references sensitive credential paths or covert outbound exfiltration.",
     ),
     (

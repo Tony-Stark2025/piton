@@ -32,6 +32,7 @@ class DriftKind(str, Enum):
     REMOVED_TOOL = "removed_tool"
     CROSS_SERVER_SHADOWING = "cross_server_shadowing"
     DAY1_POISONING = "day1_poisoning"
+    PROBE_ERROR = "probe_error"
 
 
 class DriftAction(str, Enum):
@@ -58,38 +59,41 @@ class LockVerificationResult(BaseModel):
     drifts: List[ManifestDriftItem] = Field(default_factory=list)
 
 
-def _strip_schema_descriptions(obj: Any) -> Any:
+def _strip_schema_descriptions(obj: Any, in_properties_map: bool = False) -> Any:
     """
-    Removes prose `description`/`title` fields from `inputSchema` so `structural_sha256`
+    Removes prose `description`/`title` metadata strings from `inputSchema` so `structural_sha256`
     hashes strictly the machine contract (types, required fields, property names, enums, bounds)
-    while prose changes are captured in `description_sha256`.
+    while preserving real tool parameters literally named `title` or `description` inside `properties`.
     """
     if isinstance(obj, dict):
-        return {
-            k: _strip_schema_descriptions(v)
-            for k, v in obj.items()
-            if k not in ("description", "title")
-        }
+        out: Dict[str, Any] = {}
+        for k, v in obj.items():
+            if not in_properties_map and k in ("description", "title") and isinstance(v, str):
+                continue
+            child_is_props = (not in_properties_map) and k in ("properties", "$defs", "definitions", "patternProperties") and isinstance(v, dict)
+            out[k] = _strip_schema_descriptions(v, in_properties_map=child_is_props)
+        return out
     if isinstance(obj, list):
-        return [_strip_schema_descriptions(i) for i in obj]
+        return [_strip_schema_descriptions(i, in_properties_map=False) for i in obj]
     return obj
 
 
 def _collect_prose_surface(tool: Dict[str, Any]) -> Dict[str, Any]:
     """Extracts all human/LLM prose surfaces (tool description + schema property descriptions)."""
-    def _extract_prose(obj: Any) -> Any:
+    def _extract_prose(obj: Any, in_properties_map: bool = False) -> Any:
         if isinstance(obj, dict):
             out = {}
             for k, v in obj.items():
-                if k in ("description", "title") and isinstance(v, str):
+                if not in_properties_map and k in ("description", "title") and isinstance(v, str):
                     out[k] = v.strip()
                 elif isinstance(v, (dict, list)):
-                    sub = _extract_prose(v)
+                    child_is_props = (not in_properties_map) and k in ("properties", "$defs", "definitions", "patternProperties") and isinstance(v, dict)
+                    sub = _extract_prose(v, in_properties_map=child_is_props)
                     if sub:
                         out[k] = sub
             return out
         if isinstance(obj, list):
-            items = [_extract_prose(i) for i in obj]
+            items = [_extract_prose(i, in_properties_map=False) for i in obj]
             return [i for i in items if i]
         return None
 
@@ -100,11 +104,15 @@ def _collect_prose_surface(tool: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def compute_structural_sha256(tool: Dict[str, Any]) -> str:
-    """Canonical SHA-256 of the tool's machine contract (`name` + structural `inputSchema`)."""
-    contract = {
+    """Canonical SHA-256 of the tool's machine contract (`name`, `inputSchema`, plus optional `outputSchema`/`annotations`)."""
+    contract: Dict[str, Any] = {
         "name": str(tool.get("name") or ""),
         "inputSchema": _strip_schema_descriptions(tool.get("inputSchema") or {}),
     }
+    if tool.get("outputSchema") is not None:
+        contract["outputSchema"] = _strip_schema_descriptions(tool["outputSchema"])
+    if tool.get("annotations") is not None:
+        contract["annotations"] = tool["annotations"]
     canonical = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -398,8 +406,9 @@ def render_diff_markdown(result: LockVerificationResult) -> str:
         return "### Piton Lockfile Check: Passed\nNo MCP tool schema or description drift detected."
 
     status = "BLOCKED" if not result.passed else "WARNING"
+    warn_word = "warning" if result.warning_count == 1 else "warnings"
     lines = [
-        f"### Piton Lockfile Check: {status} ({result.blocked_count} blocking, {result.warning_count} warnings)",
+        f"### Piton Lockfile Check: {status} ({result.blocked_count} blocking, {result.warning_count} {warn_word})",
         "",
         "| Action | Server | Tool | Drift Type | Details |",
         "| --- | --- | --- | --- | --- |",

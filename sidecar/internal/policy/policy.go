@@ -1022,20 +1022,28 @@ func ExtractToolsFromMCPResponse(body []byte, contentType string) ([]map[string]
 }
 
 func stripSchemaDescriptions(obj any) any {
+	return stripSchemaDescriptionsCtx(obj, false)
+}
+
+func stripSchemaDescriptionsCtx(obj any, inPropsMap bool) any {
 	switch v := obj.(type) {
 	case map[string]any:
 		out := make(map[string]any, len(v))
 		for k, val := range v {
-			if k == "description" || k == "title" {
-				continue
+			if !inPropsMap && (k == "description" || k == "title") {
+				if _, isStr := val.(string); isStr {
+					continue
+				}
 			}
-			out[k] = stripSchemaDescriptions(val)
+			_, valIsMap := val.(map[string]any)
+			childIsProps := !inPropsMap && valIsMap && (k == "properties" || k == "$defs" || k == "definitions" || k == "patternProperties")
+			out[k] = stripSchemaDescriptionsCtx(val, childIsProps)
 		}
 		return out
 	case []any:
 		out := make([]any, len(v))
 		for i, item := range v {
-			out[i] = stripSchemaDescriptions(item)
+			out[i] = stripSchemaDescriptionsCtx(item, false)
 		}
 		return out
 	default:
@@ -1044,16 +1052,22 @@ func stripSchemaDescriptions(obj any) any {
 }
 
 func extractSchemaProse(obj any) any {
+	return extractSchemaProseCtx(obj, false)
+}
+
+func extractSchemaProseCtx(obj any, inPropsMap bool) any {
 	switch v := obj.(type) {
 	case map[string]any:
 		out := make(map[string]any)
 		for k, val := range v {
-			if k == "description" || k == "title" {
+			if !inPropsMap && (k == "description" || k == "title") {
 				if s, ok := val.(string); ok {
 					out[k] = strings.TrimSpace(s)
 				}
 			} else {
-				sub := extractSchemaProse(val)
+				_, valIsMap := val.(map[string]any)
+				childIsProps := !inPropsMap && valIsMap && (k == "properties" || k == "$defs" || k == "definitions" || k == "patternProperties")
+				sub := extractSchemaProseCtx(val, childIsProps)
 				if m, ok := sub.(map[string]any); ok && len(m) > 0 {
 					out[k] = m
 				} else if a, ok := sub.([]any); ok && len(a) > 0 {
@@ -1065,7 +1079,7 @@ func extractSchemaProse(obj any) any {
 	case []any:
 		var out []any
 		for _, item := range v {
-			sub := extractSchemaProse(item)
+			sub := extractSchemaProseCtx(item, false)
 			if m, ok := sub.(map[string]any); ok && len(m) > 0 {
 				out = append(out, m)
 			}
@@ -1085,6 +1099,12 @@ func ComputeStructuralSHA256(tool map[string]any) string {
 	contract := map[string]any{
 		"name":        name,
 		"inputSchema": stripSchemaDescriptions(schema),
+	}
+	if outSchema, ok := tool["outputSchema"]; ok && outSchema != nil {
+		contract["outputSchema"] = stripSchemaDescriptions(outSchema)
+	}
+	if ann, ok := tool["annotations"]; ok && ann != nil {
+		contract["annotations"] = ann
 	}
 	b, _ := canonicalJSON(contract)
 	sum := sha256.Sum256(b)

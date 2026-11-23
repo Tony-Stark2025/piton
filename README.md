@@ -1,8 +1,10 @@
 # Piton
 
-**The `package-lock.json` and supply-chain firewall for AI coding agents.**
+**Lockfile and static supply-chain scanner for MCP servers, Claude Code hooks, and Cursor rules.**
 
-> Don't wrap your agents in a probabilistic prompt firewall. Hammer deterministic pins into every MCP tool, Claude/Cursor hook, and schema.
+> Don't wrap your agents in a probabilistic prompt firewall. Hammer deterministic split-hash pins into every MCP tool, Claude/Cursor hook, and schema.
+
+![Piton CLI Live Demo — piton scan, piton init, piton lock --diff, and piton replay exporting Cedar](docs/piton_demo.gif)
 
 Every AI coding agent (`Claude Code`, `Cursor`, `Claude Desktop`, `OpenCode`) now pulls unpinned third-party MCP tool descriptions, executes `.claude/settings.json` shell hooks, and ingests `.cursor/rules` / skill markdown files straight into privileged developer sessions. One silent upstream description edit (an MCP rug pull) or a malicious PR hook turns your repo into instant RCE.
 
@@ -15,10 +17,10 @@ Every AI coding agent (`Claude Code`, `Cursor`, `Claude Desktop`, `OpenCode`) no
 Slim Python CLI — **only 2 runtime dependencies (`pydantic` + `pyyaml`)**:
 
 ```bash
-pip install "git+https://github.com/Tony-Stark2025/piton.git@v0.4.0"
+pip install "git+https://github.com/Tony-Stark2025/piton.git@v0.4.1"
 
 # 1. Zero-config scan: catches .claude/settings.json hook RCE, .vscode/tasks.json folderOpen autorun,
-#    and hidden-Unicode / prompt-injection poisoning in .cursor/rules, CLAUDE.md, and skills
+#    malicious STDIO MCP commands, and hidden-Unicode / prompt-injection poisoning in .cursor/rules & CLAUDE.md
 piton scan --repo .
 
 # 2. Pin every MCP server with split SHA-256 hashes (probing live HTTP/SSE & STDIO servers)
@@ -26,16 +28,16 @@ piton scan --repo .
 piton init --repo . --probe
 
 # 3. Wrap any local STDIO MCP server in Cursor / Claude Code to block live rug pulls & over-bounds calls
-piton wrap --server github -- npx -y @modelcontextprotocol/server-github
+piton wrap --enforce --server github -- npx -y @modelcontextprotocol/server-github
 ```
 
-### Drop Into Any Repo in 6 Lines of GitHub Actions
+### Drop Into Any Repo in 5 Lines of GitHub Actions
 
 ```yaml
 - name: Piton — AI Agent Supply-Chain & MCP Lockfile Gate
-  uses: Tony-Stark2025/piton@v0.4.0
+  uses: Tony-Stark2025/piton@v0.4.1
   with:
-    probe: "true" # or `manifest: observed_tools.json`, or `scan-only: "true"`
+    scan-only: "true" # or `probe: "true"` / `manifest: observed_tools.json` for MCP lockfile diffs
 ```
 
 Fails pull requests loudly on:
@@ -162,9 +164,5 @@ piton control-plane --host 127.0.0.1 --port 8090            # Fleet ledger colle
 (cd sidecar && go test -race -v ./...)
 
 # Python supply-chain, live MCP probe/wrap, Control Plane E2E & cross-language Go↔Python suites
-pytest tests/test_piton_agent_supply_chain.py \
-       tests/test_control_plane_and_projection.py \
-       tests/test_sprint_abc_hardening_and_probe.py \
-       tests/test_sidecar_integration.py \
-       tests/test_agent_control_loop_v3.py -v
+pytest tests/ -v
 ```

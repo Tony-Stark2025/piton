@@ -59,4 +59,5 @@ data/
 *_auto_fix.patch
 sidecar/bin/
 .piton/
+.agents/
 

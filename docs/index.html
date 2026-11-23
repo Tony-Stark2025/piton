@@ -1,185 +1,124 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Building Piton: Autonomous API Penetration Testing & Capability Hypervisor</title>
-  <meta name="description" content="How we built an autonomous API vulnerability discovery and program repair engine with Gemini 3.7 Flash and Google Cloud.">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://unpkg.com/lucide@latest"></script>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          fontFamily: {
-            sans: ['"Plus Jakarta Sans"', 'sans-serif'],
-            mono: ['"JetBrains Mono"', 'monospace'],
-          },
-          colors: {
-            dark: {
-              bg: '#080a10',
-              card: '#0e121e',
-              border: '#1b2338',
-              muted: '#8e9bb5',
-            }
-          }
-        }
-      }
-    }
-  </script>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Piton — Lockfile and Static Supply-Chain Scanner for MCP Servers &amp; Coding Agents</title>
+  <meta name="description" content="Pin MCP tool schemas and descriptions with split SHA-256 hashes, catch Claude Code and Cursor hook RCE in CI, and export calibrated CEL/Cedar policies." />
   <style>
-    body { background-color: #080a10; color: #e2e8f0; font-family: 'Plus Jakarta Sans', sans-serif; }
-    .glass { background: rgba(14, 18, 30, 0.85); backdrop-filter: blur(12px); }
-    .glass-card { background: rgba(14, 18, 30, 0.95); backdrop-filter: blur(12px); }
-    .glow-blue { box-shadow: 0 0 25px -5px rgba(59, 130, 246, 0.25); }
-    .glow-cyan { box-shadow: 0 0 25px -5px rgba(6, 182, 212, 0.25); }
-    pre { background: #06080d; border: 1px solid #1b2338; border-radius: 0.75rem; padding: 1rem; overflow-x: auto; }
-    code { font-family: 'JetBrains Mono', monospace; }
-    #progress-bar { position: fixed; top: 0; left: 0; height: 3px; background: linear-gradient(to right, #3b82f6, #06b6d4, #10b981); width: 0%; z-index: 100; }
+    :root {
+      --bg: #0b1020;
+      --surface: #0d1117;
+      --surface-2: #161b22;
+      --border: #2b364f;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #67e8f9;
+      --green: #4ade80;
+      --red: #ff6b6b;
+      --amber: #f6c177;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background: linear-gradient(180deg, #0b1020 0%, #0d1117 100%);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .wrap { max-width: 920px; margin: 0 auto; padding: 48px 24px 80px; }
+    nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 56px; }
+    .brand { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; font-size: 1.15rem; color: var(--text); text-decoration: none; letter-spacing: 0.04em; }
+    .brand span { color: var(--accent); }
+    .nav-links a { color: var(--muted); text-decoration: none; margin-left: 20px; font-size: 0.95rem; }
+    .nav-links a:hover { color: var(--text); }
+    h1 { font-size: clamp(2rem, 4.5vw, 3rem); line-height: 1.15; margin: 0 0 16px; letter-spacing: -0.02em; }
+    .lead { font-size: 1.15rem; color: var(--muted); max-width: 720px; margin: 0 0 28px; }
+    .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 40px; }
+    .btn { display: inline-block; padding: 11px 18px; border-radius: 8px; font-weight: 600; text-decoration: none; font-size: 0.95rem; }
+    .btn-primary { background: var(--accent); color: #0b1020; }
+    .btn-secondary { border: 1px solid var(--border); color: var(--text); background: var(--surface-2); }
+    pre {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 20px;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9rem;
+      line-height: 1.55;
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; margin: 40px 0; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .card h3 { margin: 0 0 8px; font-size: 1.05rem; color: var(--accent); }
+    .card p { margin: 0; color: var(--muted); font-size: 0.94rem; }
+    .demo-img { width: 100%; border-radius: 12px; border: 1px solid var(--border); margin: 28px 0; display: block; }
+    h2 { margin: 48px 0 14px; font-size: 1.45rem; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; color: var(--accent); }
+    pre code { color: var(--text); }
+    footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.88rem; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+    footer a { color: var(--muted); }
   </style>
 </head>
-<body class="selection:bg-blue-600 selection:text-white min-h-screen flex flex-col">
+<body>
+  <div class="wrap">
+    <nav>
+      <a class="brand" href="https://github.com/Tony-Stark2025/piton"><span>&gt;_</span> piton</a>
+      <div class="nav-links">
+        <a href="https://github.com/Tony-Stark2025/piton">GitHub</a>
+        <a href="https://github.com/Tony-Stark2025/piton/releases">Releases</a>
+        <a href="https://github.com/Tony-Stark2025/piton#30-second-quickstart">Quickstart</a>
+      </div>
+    </nav>
 
-  <div id="progress-bar"></div>
+    <h1>Lockfile and static supply-chain scanner for MCP servers and coding agents.</h1>
+    <p class="lead">
+      Pin MCP tool schemas and descriptions with split SHA-256 hashes, catch malicious <code>.claude/settings.json</code> hooks and bidi-poisoned <code>.cursor/rules</code> in CI, and replay shadow traces offline to export CEL or Cedar policies. Two Python runtime dependencies: <code>pydantic</code> and <code>pyyaml</code>.
+    </p>
 
-  <!-- TOP NAVIGATION HEADER -->
-  <header class="sticky top-0 z-50 glass border-b border-dark-border">
-    <div class="max-w-4xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
-      <div class="flex items-center space-x-3">
-        <div class="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-cyan-500 flex items-center justify-center text-white font-bold shadow-md shadow-blue-500/20">
-          <i data-lucide="shield-alert" class="w-4 h-4"></i>
-        </div>
-        <span class="font-bold text-white tracking-tight text-sm font-mono">PITON ENTERPRISE</span>
-      </div>
-      <div class="flex items-center space-x-4 text-xs font-medium">
-        <a href="/dashboard" class="text-slate-400 hover:text-white transition flex items-center space-x-1">
-          <i data-lucide="layout-dashboard" class="w-3.5 h-3.5"></i>
-          <span>Dashboard</span>
-        </a>
-        <a href="/documentation" class="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white transition flex items-center space-x-1.5 font-semibold">
-          <i data-lucide="book-open" class="w-3.5 h-3.5"></i>
-          <span>Docs & Whitepaper</span>
-        </a>
-      </div>
-    </div>
-  </header>
-
-  <!-- ARTICLE MAIN BODY -->
-  <main class="max-w-4xl mx-auto px-4 sm:px-6 py-12 flex-1">
-    
-    <!-- ARTICLE TITLE & METADATA -->
-    <div class="space-y-4 pb-8 border-b border-dark-border">
-      <div class="inline-flex items-center space-x-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-mono">
-        <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
-        <span>Autonomous API Security & Program Repair</span>
-      </div>
-      <h1 class="text-3xl sm:text-4xl font-extrabold text-white tracking-tight leading-tight">
-        Building Piton: Autonomous API Penetration Testing & Capability Hypervisor with Gemini 3.7 & Google Cloud
-      </h1>
-      <p class="text-lg text-slate-300 font-light leading-relaxed">
-        Eliminating 100% of API security false positives with cryptographic reflection defense, CEGIS dual-pass AST program repair, and an inline capability hypervisor firewall.
-      </p>
-      <div class="flex items-center space-x-4 pt-2 text-xs text-slate-400 font-mono">
-        <span>By Bright Onwe</span>
-        <span>•</span>
-        <span>October 2026</span>
-        <span>•</span>
-        <span>Enterprise Security Track</span>
-      </div>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="https://github.com/Tony-Stark2025/piton">View on GitHub</a>
+      <a class="btn btn-secondary" href="https://github.com/Tony-Stark2025/piton/releases/tag/v0.4.1">Download v0.4.1</a>
     </div>
 
-    <!-- CONTENT SECTIONS -->
-    <article class="prose prose-invert max-w-none pt-8 space-y-8 text-sm leading-relaxed text-slate-300">
-      
-      <section class="space-y-4">
-        <h2 class="text-xl font-bold text-white tracking-tight flex items-center space-x-2">
-          <span>🎯 The False-Positive Crisis in API Security</span>
-        </h2>
-        <p>
-          Broken authorization (BOLA and BFLA) accounts for over 60% of modern API security vulnerabilities. Traditional DAST scanners flood security teams with false alarms based on HTTP status codes, while manual pentests take weeks and cost tens of thousands of dollars.
-        </p>
-        <p>
-          To permanently solve this, we built <strong>Piton</strong>: an autonomous system combining zero false-positive vulnerability discovery, automated AST source code repair, and an inline capability hypervisor.
-        </p>
-      </section>
+    <pre><code>pip install "git+https://github.com/Tony-Stark2025/piton.git@v0.4.1"
 
-      <section class="space-y-4">
-        <h2 class="text-xl font-bold text-white tracking-tight">🏛️ Core Architecture</h2>
-        <pre><code class="text-xs text-slate-200">[ CI/CD Pipeline / CLI / MCP Client ]
-                 │
-                 ▼
- ┌──────────────────────────────────────┐
- │       API Lineage Graph Engine       │
- │   - OpenAPI 3.x Parsing              │
- │   - Tarjan SCC Topological Order     │
- └───────────────────┬──────────────────┘
-                     │
-                     ▼
- ┌──────────────────────────────────────┐
- │    Exploit Prober & Canary Defense   │
- │   - Dual-Tenant Session Synthesis    │
- │   - Cryptographic Reflection Oracle  │
- │   - Multi-Tier SSRF Guardrails       │
- └───────────────────┬──────────────────┘
-                     │
-                     ▼
- ┌──────────────────────────────────────┐
- │   CEGIS Dual-Pass AST Program Repair │
- │   - Gemini 3.7 Flash AST Synthesizer │
- │   - In-Memory ASGI Test Oracle       │
- │   - Certified Unified Git Diff PR    │
- └───────────────────┬──────────────────┘
-                     │
-                     ▼
- ┌──────────────────────────────────────┐
- │     Inline Capability Hypervisor     │
- │   - Scoped HMAC Capability Tokens    │
- │   - Pre-State Witness H(S) Ledger    │
- │   - Semantic Denial Recovery Envelopes│
- └──────────────────────────────────────┘</code></pre>
-      </section>
+# 1. Scan repo for Claude Code hook RCE, VS Code folderOpen tasks &amp; poisoned rules
+piton scan --repo .
 
-      <section class="space-y-4">
-        <h2 class="text-xl font-bold text-white tracking-tight">⚡ Key Innovations</h2>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div class="glass-card p-4 rounded-xl border border-dark-border space-y-2">
-            <h3 class="font-bold text-white text-xs">Reflection Defense</h3>
-            <p class="text-xs text-slate-400">Canaries injected into victim resources must be reflected in the unauthorized probe's response, mathematically guaranteeing zero false positives.</p>
-          </div>
-          <div class="glass-card p-4 rounded-xl border border-dark-border space-y-2">
-            <h3 class="font-bold text-white text-xs">CEGIS Program Repair</h3>
-            <p class="text-xs text-slate-400">Dual-pass oracle ensures synthesized patches block attackers (403/404) while preserving legitimate owner workflows (200).</p>
-          </div>
-          <div class="glass-card p-4 rounded-xl border border-dark-border space-y-2">
-            <h3 class="font-bold text-white text-xs">Capability Hypervisor</h3>
-            <p class="text-xs text-slate-400">Inline firewall validating scoped capability tokens, pre-state witnesses H(S), and monotonic action permits.</p>
-          </div>
-          <div class="glass-card p-4 rounded-xl border border-dark-border space-y-2">
-            <h3 class="font-bold text-white text-xs">Semantic Denial Envelopes</h3>
-            <p class="text-xs text-slate-400">Structured violation envelopes providing automated recovery steps for AI agents and developer tooling.</p>
-          </div>
-        </div>
-      </section>
+# 2. Pin MCP servers with split SHA-256 hashes (structural vs. description)
+piton init --repo . --probe
 
-    </article>
-  </main>
+# 3. Wrap any local STDIO MCP server in Cursor or Claude Code
+piton wrap --enforce --server github -- npx -y @modelcontextprotocol/server-github</code></pre>
 
-  <footer class="border-t border-dark-border py-6 text-center text-xs text-slate-500">
-    Piton • Built on Google Cloud & Gemini 3.7 Flash
-  </footer>
+    <img class="demo-img" src="./piton_demo.gif" alt="Piton CLI live demo: piton scan, piton init, piton lock --diff, and piton replay exporting Cedar" />
 
-  <script>
-    lucide.createIcons();
-    window.addEventListener('scroll', () => {
-      const winScroll = document.documentElement.scrollTop;
-      const height = document.documentElement.scrollHeight - document.documentElement.clientHeight;
-      const scrolled = (winScroll / height) * 100;
-      document.getElementById('progress-bar').style.width = scrolled + '%';
-    });
-  </script>
+    <div class="grid">
+      <div class="card">
+        <h3>Split-Hash MCP Lockfiles</h3>
+        <p><code>structural_sha256</code> hard-blocks schema changes everywhere. <code>description_sha256</code> hard-blocks third-party rug pulls while warning on internal docstring edits so CI never breaks on typo fixes.</p>
+      </div>
+      <div class="card">
+        <h3>Coding-Agent RCE Lint</h3>
+        <p>Catches <code>.claude/settings.json</code> <code>curl|sh</code>, reverse shells, credential harvesting, and <code>Bash(*)</code> wildcards, plus <code>.vscode/tasks.json</code> <code>folderOpen</code> autorun and hidden bidi Unicode in <code>.cursor/rules</code>.</p>
+      </div>
+      <div class="card">
+        <h3>Shadow Replay &rarr; CEL / Cedar</h3>
+        <p>Tokenizes PII while keeping domains and numeric bounds replayable, ingests OTel JSONL spans, calibrates false-block rates offline, and exports rules for <code>agentgateway</code>, ToolHive, AWS AgentCore, or Envoy <code>ext_proc</code>.</p>
+      </div>
+    </div>
+
+    <h2>Drop Into GitHub Actions</h2>
+    <pre><code>- name: Piton — AI Agent Supply-Chain &amp; MCP Lockfile Gate
+  uses: Tony-Stark2025/piton@v0.4.1
+  with:
+    scan-only: "true" # or probe: "true" to also diff live MCP manifests</code></pre>
+
+    <footer>
+      <span>Piton v0.4.1 &middot; MIT License</span>
+      <span><a href="https://github.com/Tony-Stark2025/piton">github.com/Tony-Stark2025/piton</a></span>
+    </footer>
+  </div>
 </body>
 </html>

@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import json
 import math
+import os
 from pathlib import Path
 import re
 import time
@@ -55,7 +56,10 @@ class DeterministicTokenizer:
     - Arbitrary PII strings (`ssn`, `phone`, `customer_name`) become `tok_<12hex>`.
     """
 
-    def __init__(self, secret_key: bytes = b"piton-default-tokenizer-key") -> None:
+    def __init__(self, secret_key: Optional[bytes] = None) -> None:
+        if secret_key is None:
+            env_key = os.getenv("PITON_TOKENIZER_KEY", "piton-default-tokenizer-key")
+            secret_key = env_key.encode("utf-8")
         self._key = secret_key
 
     def _hmac_hex(self, value: str, length: int = 12) -> str:
@@ -141,13 +145,13 @@ def _check_parameter_bound(param_name: str, value: Any, bound: ParameterBound, o
     violations: List[RuleViolation] = []
 
     if bound.min is not None or bound.max is not None:
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or math.isnan(value) or math.isinf(value):
             violations.append(
                 RuleViolation(
                     rule_id="PARAM_TYPE_MISMATCH",
                     parameter=param_name,
-                    message=f"Parameter '{param_name}' expected numeric value for range bound.",
-                    observed_value=value,
+                    message=f"Parameter '{param_name}' expected finite numeric value for range bound.",
+                    observed_value=str(value) if isinstance(value, float) and (math.isnan(value) or math.isinf(value)) else value,
                     configured_bound={"min": bound.min, "max": bound.max},
                     recommended_action=on_exceed,
                 )
@@ -749,6 +753,31 @@ def load_otel_or_ledger_records(
     return records
 
 
+_CEDAR_RESERVED = frozenset(
+    {"true", "false", "in", "like", "has", "is", "if", "then", "else", "permit", "forbid", "when", "unless"}
+)
+
+
+def _cedar_arg_expr(pname: str) -> str:
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", pname) and pname not in _CEDAR_RESERVED:
+        return f"context.arguments.{pname}"
+    return f"context.arguments[{json.dumps(pname)}]"
+
+
+def _cedar_has_expr(pname: str) -> str:
+    if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", pname) and pname not in _CEDAR_RESERVED:
+        return f"context.arguments has {pname}"
+    return f"context.arguments has {json.dumps(pname)}"
+
+
+def _format_cedar_decimal(val: float) -> str:
+    # Cedar decimal() requires up to 4 fractional digits and a decimal point (e.g. "100.00")
+    s = f"{float(val):.4f}".rstrip("0")
+    if s.endswith("."):
+        s += "0"
+    return f'decimal("{s}")'
+
+
 def export_cel_policies(config: AgentIaCConfig) -> str:
     """
     Compiles calibrated `piton.yaml` parameter bounds into ready-to-apply CEL
@@ -759,8 +788,10 @@ def export_cel_policies(config: AgentIaCConfig) -> str:
         "# Compatible with AAIF agentgateway & Envoy CEL authorization policies",
         "policies:",
     ]
+    count = 0
     for srv_name, srv in sorted(config.mcp_servers.items()):
         for tool_name, tpol in sorted(srv.tools.items()):
+            count += 1
             preds: List[str] = [
                 f'mcp.server == "{srv_name}"',
                 f'mcp.tool.name == "{tool_name}"',
@@ -770,23 +801,30 @@ def export_cel_policies(config: AgentIaCConfig) -> str:
             if tpol.idempotency_key == "required":
                 preds.append('has(request.headers["idempotency-key"]) && request.headers["idempotency-key"] != ""')
             for pname, b in sorted(tpol.parameter_bounds.items()):
-                if b.required:
-                    preds.append(f'"{pname}" in mcp.tool.arguments')
+                p_checks: List[str] = []
                 if b.min is not None:
-                    preds.append(f'double(mcp.tool.arguments["{pname}"]) >= {b.min}')
+                    p_checks.append(f'double(mcp.tool.arguments["{pname}"]) >= {b.min}')
                 if b.max is not None:
-                    preds.append(f'double(mcp.tool.arguments["{pname}"]) <= {b.max}')
+                    p_checks.append(f'double(mcp.tool.arguments["{pname}"]) <= {b.max}')
                 if b.enum:
                     enum_lit = json.dumps(b.enum)
-                    preds.append(f'mcp.tool.arguments["{pname}"] in {enum_lit}')
+                    p_checks.append(f'mcp.tool.arguments["{pname}"] in {enum_lit}')
                 if b.allow_domains:
-                    dom_expr = " || ".join(
-                        f'string(mcp.tool.arguments["{pname}"]).endsWith("@{d.lower()}")'
-                        for d in b.allow_domains
+                    arg_str = f'string(mcp.tool.arguments["{pname}"])'
+                    dom_expr = " || ".join(f'{arg_str}.endsWith("@{d.lower()}")' for d in b.allow_domains)
+                    # Reject URL-userinfo smuggling such as https://evil.com/?x=@acme.com
+                    p_checks.append(
+                        f'(!{arg_str}.contains("://") && !{arg_str}.contains("?") && !{arg_str}.contains("/") && ({dom_expr}))'
                     )
-                    preds.append(f"({dom_expr})")
+                if b.required:
+                    preds.append(f'"{pname}" in mcp.tool.arguments')
+                    preds.extend(p_checks)
+                elif p_checks:
+                    preds.append(f'(!("{pname}" in mcp.tool.arguments) || ({" && ".join(p_checks)}))')
             lines.append(f"  - name: allow_{srv_name}_{tool_name}".replace("-", "_"))
             lines.append(f"    match: '{' && '.join(preds)}'")
+    if count == 0:
+        lines.append("  # No MCP tool policies defined in piton.yaml yet. Run `piton init --probe` first.")
     return "\n".join(lines) + "\n"
 
 
@@ -794,37 +832,56 @@ def export_cedar_policies(config: AgentIaCConfig) -> str:
     """
     Compiles calibrated `piton.yaml` parameter bounds into ready-to-apply Cedar
     policies for Stacklok ToolHive and AWS Bedrock AgentCore Policy.
+    Uses Cedar `decimal("...")` extension methods for numeric bounds so dollar/float
+    ceilings are preserved at exact scale (never scaled by 100x).
     """
     blocks = [
         f"// Auto-generated by Piton Replay/Compiler for agent '{config.agent.id}'",
         "// Compatible with Stacklok ToolHive & AWS Bedrock AgentCore Policy (Cedar)",
         "",
     ]
+    count = 0
     for srv_name, srv in sorted(config.mcp_servers.items()):
         for tool_name, tpol in sorted(srv.tools.items()):
+            count += 1
             conds: List[str] = []
+            if config.identity.mode == IdentityMode.OIDC_OBO and config.identity.require_delegated_sub:
+                conds.append("context has delegated_sub")
             if tpol.idempotency_key == "required":
                 conds.append("context has idempotency_key")
             for pname, b in sorted(tpol.parameter_bounds.items()):
-                if b.required:
-                    conds.append(f"context.arguments has {pname}")
+                arg_ref = _cedar_arg_expr(pname)
+                has_ref = _cedar_has_expr(pname)
+                p_checks: List[str] = []
                 if b.min is not None:
-                    conds.append(f"context.arguments.{pname} >= {int(round(b.min * 100))}")
+                    if isinstance(b.min, int) and not isinstance(b.min, bool):
+                        p_checks.append(f"{arg_ref} >= {b.min}")
+                    else:
+                        p_checks.append(f"{arg_ref}.greaterThanOrEqual({_format_cedar_decimal(b.min)})")
                 if b.max is not None:
-                    conds.append(f"context.arguments.{pname} <= {int(round(b.max * 100))}")
+                    if isinstance(b.max, int) and not isinstance(b.max, bool):
+                        p_checks.append(f"{arg_ref} <= {b.max}")
+                    else:
+                        p_checks.append(f"{arg_ref}.lessThanOrEqual({_format_cedar_decimal(b.max)})")
                 if b.enum:
-                    enum_expr = " || ".join(f'context.arguments.{pname} == {json.dumps(v)}' for v in b.enum)
-                    conds.append(f"({enum_expr})")
+                    enum_expr = " || ".join(f"{arg_ref} == {json.dumps(v)}" for v in b.enum)
+                    p_checks.append(f"({enum_expr})")
                 if b.allow_domains:
-                    dom_expr = " || ".join(
-                        f'context.arguments.{pname} like "*@{d.lower()}"' for d in b.allow_domains
+                    dom_expr = " || ".join(f'{arg_ref} like "*@{d.lower()}"' for d in b.allow_domains)
+                    # Reject URL-userinfo smuggling such as https://evil.com/?x=@acme.com
+                    p_checks.append(
+                        f'!({arg_ref} like "*://*") && !({arg_ref} like "*?*") && !({arg_ref} like "*/*") && ({dom_expr})'
                     )
-                    conds.append(f"({dom_expr})")
-            blocks.append(f'permit (')
-            blocks.append(f'  principal is Agent::Principal,')
+                if b.required:
+                    conds.append(has_ref)
+                    conds.extend(p_checks)
+                elif p_checks:
+                    conds.append(f"(!({has_ref}) || ({' && '.join(p_checks)}))")
+            blocks.append("permit (")
+            blocks.append("  principal is Agent::Principal,")
             blocks.append(f'  action == MCP::Action::"{srv_name}:{tool_name}",')
-            blocks.append(f'  resource')
-            blocks.append(f')')
+            blocks.append("  resource")
+            blocks.append(")")
             if conds:
                 blocks.append("when {")
                 blocks.append("  " + " &&\n  ".join(conds))
@@ -832,5 +889,8 @@ def export_cedar_policies(config: AgentIaCConfig) -> str:
             else:
                 blocks[-1] += ";"
             blocks.append("")
+    if count == 0:
+        blocks.append("// No MCP tool policies defined in piton.yaml yet. Run `piton init --probe` first.")
+        blocks.append("")
     return "\n".join(blocks)
 

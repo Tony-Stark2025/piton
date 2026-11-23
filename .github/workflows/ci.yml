@@ -41,7 +41,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
 
       - name: Set up Go (for cross-language sidecar integration test)
         uses: actions/setup-go@v5
@@ -49,27 +48,31 @@ jobs:
           go-version: "1.26"
           cache-dependency-path: sidecar/go.sum
 
-      - name: Install Dependencies
+      - name: Install Slim 2-Dep Package + Dev Test Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install --no-deps -e .
+          pip install -e ".[dev]"
 
-      - name: Run Agent Control Loop, Cross-Language Sidecar & Unit Suites
-        env:
-          ENVIRONMENT: testing
-          LOG_LEVEL: DEBUG
-          USE_VERTEX_AI: "false"
-          GEMINI_API_KEY: ""
+      - name: Run Full Piton CLI, Supply-Chain, Control Plane & Cross-Language Suites
         run: |
-          timeout 300 pytest tests/test_piton_agent_supply_chain.py tests/test_control_plane_and_projection.py tests/test_sprint_abc_hardening_and_probe.py tests/test_agent_control_loop_v3.py tests/test_sidecar_integration.py tests/test_ifc_and_patch_risk_gate.py tests/test_security_hardening_fixes.py -v --tb=short
-          timeout 300 pytest tests/unit/ -v --tb=short --durations=10
-          timeout 300 pytest tests/integration/ -v --tb=short --durations=10
-          timeout 300 pytest tests/test_piton_v25_architecture.py tests/test_commercial_saas_and_agentic_owasp.py tests/adversarial/ tests/test_endpoints.py -v --tb=short --durations=10
+          timeout 300 pytest tests/ -v --tb=short
 
       - name: Verify 60-Second End-to-End Quickstart Demo
         run: |
           bash examples/quickstart-billing-agent/run_demo.sh
+
+  dogfood-piton-action:
+    name: Dogfood Piton GitHub Action (scan-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run Piton Action on Self Repo
+        uses: ./
+        with:
+          scan-only: "true"
 
   envoy-wire-e2e:
     name: Real Envoy v1.33 Proxy <-> Go Sidecar ext_proc Wire E2E
@@ -116,4 +119,3 @@ jobs:
           grep -q "kind: ServiceMonitor" /tmp/rendered.yaml
           grep -q -- "--redis-addr=" /tmp/rendered.yaml
           grep -q -- "--collector-url=" /tmp/rendered.yaml
-

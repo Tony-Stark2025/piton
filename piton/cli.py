@@ -107,7 +107,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     agent_cfg_scan = scan_agent_supply_chain(repo)
     print(f"Piton initialized for agent '{res.config.agent.id}' (mode={res.config.agent.mode.value})")
-    print(f"  Discovered files: {', '.join(res.discovered_files + agent_cfg_scan.scanned_files) or 'none'}")
+    all_discovered = list(dict.fromkeys(res.discovered_files + agent_cfg_scan.scanned_files))
+    print(f"  Discovered files: {', '.join(all_discovered) or 'none'}")
     for label, p in paths.items():
         print(f"  Wrote {label}: {p}")
 
@@ -115,9 +116,11 @@ def _cmd_init(args: argparse.Namespace) -> int:
     if all_findings:
         print(f"\n[!] Day-1 Supply-Chain & MCP Poisoning Linter flagged {len(all_findings)} finding(s):")
         for f in all_findings:
-            print(f"  - [{f.severity.value.upper()}] {f.server_name}.{f.tool_name} ({f.rule_id}): {f.message}")
+            target = f"{f.server_name}: {f.tool_name}" if f.server_name in ("agent-config", "agent-rules", "mcp-config") else f"{f.server_name}.{f.tool_name}"
+            print(f"  - [{f.severity.value.upper()}] {target} ({f.rule_id}): {f.message}")
         if not args.allow_poisoned:
-            print("  Quarantined CRITICAL/HIGH tools were excluded from piton.lock.")
+            if any(f.severity.value in ("critical", "high") for f in res.poisoning_findings):
+                print("  Quarantined CRITICAL/HIGH MCP tools were excluded from piton.yaml and piton.lock.")
             return 2
     return 0
 
@@ -126,10 +129,15 @@ def _cmd_lock(args: argparse.Namespace) -> int:
     lock_path = Path(args.lockfile)
     config_path = Path(args.config)
     config = AgentIaCConfig.load_file(config_path) if config_path.is_file() else None
+    probe_errs: Dict[str, str] = {}
 
     if args.manifest:
+        manifest_path = Path(args.manifest)
+        if not manifest_path.is_file():
+            print(f"Error: manifest file not found at {manifest_path}.", file=sys.stderr)
+            return 1
         manifest_data: Dict[str, List[Dict[str, Any]]] = json.loads(
-            Path(args.manifest).read_text(encoding="utf-8")
+            manifest_path.read_text(encoding="utf-8")
         )
     elif args.probe and config is not None:
         manifest_data, probe_errs = probe_configured_servers(config, timeout=getattr(args, "probe_timeout", 8.0))
@@ -151,6 +159,9 @@ def _cmd_lock(args: argparse.Namespace) -> int:
 
     shadowing = detect_cross_server_shadowing(manifest_data)
     if args.update:
+        if probe_errs:
+            print("Error: refusing to update lockfile because one or more MCP servers failed to probe.", file=sys.stderr)
+            return 1
         new_lock, findings = build_lockfile_from_servers(servers_for_lock, allow_poisoned=args.allow_poisoned)
         new_lock.save_file(lock_path)
         print(f"Updated {lock_path} (sha256={new_lock.canonical_sha256()[:16]}...)")
@@ -169,11 +180,25 @@ def _cmd_lock(args: argparse.Namespace) -> int:
         diff_res = diff_lockfiles(existing_lock, new_lock)
         diff_res.drifts.extend(shadowing)
         diff_res.blocked_count += len(shadowing)
+        # Fail closed when a pinned server fails live probing
+        for srv_name, err in probe_errs.items():
+            if srv_name in existing_lock.servers:
+                diff_res.drifts.append(
+                    ManifestDriftItem(
+                        server_name=srv_name,
+                        tool_name="*",
+                        kind=DriftKind.PROBE_ERROR,
+                        action=DriftAction.BLOCK,
+                        message=f"Live probe failed for pinned server '{srv_name}': {err}",
+                    )
+                )
+                diff_res.blocked_count += 1
         # Include static coding-agent hook/skill/rules RCE findings when scanning repo
-        repo_dir = Path(getattr(args, "repo", ".") or ".").resolve()
-        if repo_dir.is_dir():
-            agent_scan = scan_agent_supply_chain(repo_dir)
-            poison_findings.extend(agent_scan.findings)
+        if not getattr(args, "no_agent_scan", False):
+            repo_dir = Path(getattr(args, "repo", ".") or ".").resolve()
+            if repo_dir.is_dir():
+                agent_scan = scan_agent_supply_chain(repo_dir)
+                poison_findings.extend(agent_scan.findings)
         # Always block CI on CRITICAL/HIGH Day-1 or rug-pull poisoning even on internal servers
         for pf in poison_findings:
             if pf.severity.value in ("critical", "high"):
@@ -192,7 +217,10 @@ def _cmd_lock(args: argparse.Namespace) -> int:
         return 0 if diff_res.passed else 1
 
     # Live/CI verification mode
-    all_passed = len(shadowing) == 0
+    all_passed = len(shadowing) == 0 and not any(s in existing_lock.servers for s in probe_errs)
+    for srv_name, err in probe_errs.items():
+        if srv_name in existing_lock.servers:
+            print(f"[BLOCK] Live probe failed for pinned server '{srv_name}': {err}")
     for s in shadowing:
         print(f"[BLOCK] {s.message}")
     for srv_name, tools in manifest_data.items():
@@ -204,15 +232,29 @@ def _cmd_lock(args: argparse.Namespace) -> int:
 
 
 def _cmd_replay(args: argparse.Namespace) -> int:
-    config = AgentIaCConfig.load_file(Path(args.config))
+    cfg_path = Path(args.config)
+    if not cfg_path.is_file():
+        print(f"Error: config file not found at {cfg_path}. Run `piton init` first.", file=sys.stderr)
+        return 1
+    config = AgentIaCConfig.load_file(cfg_path)
     records = load_otel_or_ledger_records(Path(args.traces))
     report = replay_traces(config, records, simulate_enforce=args.simulate_enforce)
 
-    if args.export == "cel":
-        print(export_cel_policies(config))
-        return 0
-    if args.export == "cedar":
-        print(export_cedar_policies(config))
+    if args.export in ("cel", "cedar"):
+        if args.strict and not report.ready_to_enforce:
+            print(
+                f"Error: replay reported {report.blocked_or_escalated_count}/{report.total_replayed} "
+                f"blocked/escalated calls ({report.false_block_rate_pct}%); refusing to export under --strict.",
+                file=sys.stderr,
+            )
+            return 1
+        if not report.ready_to_enforce and report.total_replayed > 0:
+            print(
+                f"[warn] Exporting current {cfg_path.name} with {report.blocked_or_escalated_count}/{report.total_replayed} "
+                f"uncalibrated call(s) ({report.false_block_rate_pct}%); pass --strict to block uncalibrated exports.",
+                file=sys.stderr,
+            )
+        print(export_cel_policies(config) if args.export == "cel" else export_cedar_policies(config))
         return 0
 
     if args.json:
@@ -222,7 +264,10 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         print(f"  Replayed calls:        {report.total_replayed}")
         print(f"  Allowed:               {report.allowed_count}")
         print(f"  Blocked / Escalated:   {report.blocked_or_escalated_count} ({report.false_block_rate_pct}%)")
-        print(f"  Ready to enforce:      {'YES' if report.ready_to_enforce else 'NO'}")
+        readiness = "YES" if report.ready_to_enforce else "NO"
+        if report.ready_to_enforce and report.total_replayed < 20:
+            readiness += f" (low sample size: {report.total_replayed} calls; recommend >= 20)"
+        print(f"  Ready to enforce:      {readiness}")
         if report.suggestions:
             print("\nCalibration Suggestions:")
             for s in report.suggestions:
@@ -285,7 +330,11 @@ def _cmd_top(args: argparse.Namespace) -> int:
 
 
 def _cmd_compile(args: argparse.Namespace) -> int:
-    config = AgentIaCConfig.load_file(Path(args.config))
+    cfg_path = Path(args.config)
+    if not cfg_path.is_file():
+        print(f"Error: config file not found at {cfg_path}. Run `piton init` first.", file=sys.stderr)
+        return 1
+    config = AgentIaCConfig.load_file(cfg_path)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
@@ -434,6 +483,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     config_path = Path(args.config)
+    if not config_path.is_file():
+        print(f"Error: config file not found at {config_path}. Run `piton init` first.", file=sys.stderr)
+        return 1
     config = AgentIaCConfig.load_file(config_path)
     compiled_path = Path(args.compiled_policy)
     compiled_path.parent.mkdir(parents=True, exist_ok=True)
@@ -506,14 +558,25 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if not cmd:
-        print("Error: provide a STDIO MCP command after `--`, e.g. `piton wrap --server fs -- npx @modelcontextprotocol/server-filesystem`", file=sys.stderr)
+        print("Error: provide a STDIO MCP command after `--`, e.g. `piton wrap --enforce --server fs -- npx @modelcontextprotocol/server-filesystem`", file=sys.stderr)
         return 2
 
-    config = AgentIaCConfig.load_file(Path(args.config))
+    cfg_path = Path(args.config)
+    if not cfg_path.is_file():
+        print(f"Error: config file not found at {cfg_path}. Run `piton init` first.", file=sys.stderr)
+        return 1
+    config = AgentIaCConfig.load_file(cfg_path)
     lockfile = ManifestLockfile.load_file(Path(args.lockfile)) if Path(args.lockfile).is_file() else None
     signing_key = os.getenv("PITON_LEDGER_SIGNING_KEY", "piton-ledger-signing-key").encode("utf-8")
     ledger = SignedDecisionLedger(Path(args.traces), signing_key=signing_key) if args.traces else None
-    return wrap_stdio_mcp(args.server, cmd, config, lockfile, ledger=ledger)
+    return wrap_stdio_mcp(
+        args.server,
+        cmd,
+        config,
+        lockfile,
+        ledger=ledger,
+        enforce_override=getattr(args, "enforce", False),
+    )
 
 
 def _cmd_control_plane(args: argparse.Namespace) -> int:
@@ -548,13 +611,16 @@ def _cmd_control_plane(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from piton import __version__
+
     cfg_default = _default_config_name()
     lock_default = _default_lock_name()
 
     parser = argparse.ArgumentParser(
         prog="piton",
-        description="Piton — The package-lock.json & supply-chain firewall for AI coding agents (MCP split-hash pinning, Claude/Cursor hook RCE linting, shadow replay -> CEL/Cedar & Envoy ext_proc).",
+        description="Piton — Lockfile and static supply-chain scanner for MCP servers, Claude Code hooks, and Cursor rules.",
     )
+    parser.add_argument("-V", "--version", action="version", version=f"piton {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_scan = sub.add_parser("scan", help="Zero-config scan for Claude Code hook RCE, VS Code folderOpen autorun & poisoned Cursor/skill rules")
@@ -594,6 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_wrap.add_argument("--config", default=cfg_default)
     p_wrap.add_argument("--lockfile", default=lock_default)
     p_wrap.add_argument("--traces", default=".piton/traces.jsonl")
+    p_wrap.add_argument("--enforce", action="store_true", help="Hard-block rug pulls & bound violations even if piton.yaml is in shadow mode")
     p_wrap.add_argument("cmd", nargs=argparse.REMAINDER, help="STDIO MCP server command (prefix with --)")
     p_wrap.set_defaults(func=_cmd_wrap)
 
@@ -606,6 +673,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_lock = sub.add_parser("lock", help="Verify, diff, or update split-hash MCP pins & agent hook/skill supply-chain checks")
     p_lock.add_argument("--repo", default=".", help="Repository path to also lint for coding-agent hook/skill poisoning")
+    p_lock.add_argument("--no-agent-scan", action="store_true", help="Skip static repo hook/rule scan (e.g. when piton scan already ran)")
     p_lock.add_argument("--manifest", default=None, help="JSON file mapping server_name -> observed tools/list array")
     p_lock.add_argument("--probe", action="store_true", help="Live-probe MCP servers from config instead of static JSON")
     p_lock.add_argument("--probe-timeout", type=float, default=8.0, help="Per-server live probe timeout in seconds")

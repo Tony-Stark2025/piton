@@ -376,6 +376,7 @@ def wrap_stdio_mcp(
     ledger: Optional[SignedDecisionLedger] = None,
     stdin_stream=None,
     stdout_stream=None,
+    enforce_override: bool = False,
 ) -> int:
     """
     Transparent STDIO JSON-RPC wrapper for Cursor / Claude Desktop / Claude Code MCP servers.
@@ -389,6 +390,19 @@ def wrap_stdio_mcp(
     """
     client_in = stdin_stream or sys.stdin
     client_out = stdout_stream or sys.stdout
+
+    effective_mode = EnforcementMode.ENFORCE if enforce_override else config.agent.mode
+    effective_config = config.model_copy(
+        deep=True,
+        update={"agent": config.agent.model_copy(update={"mode": effective_mode})},
+    )
+
+    if lockfile is None:
+        sys.stderr.write(
+            f"[piton-wrap] WARNING: no piton.lock loaded for '{server_name}'; "
+            "tools/list rug-pull pinning is disabled until you run `piton init` or pass --lockfile.\n"
+        )
+        sys.stderr.flush()
 
     proc = subprocess.Popen(
         cmd,
@@ -442,23 +456,31 @@ def wrap_stdio_mcp(
                 if lockfile is not None and isinstance(res, dict) and isinstance(res.get("tools"), list):
                     tools = [t for t in res["tools"] if isinstance(t, dict)]
                     ver = verify_tools_list(lockfile, server_name, tools)
-                    if not ver.passed and config.agent.mode == EnforcementMode.ENFORCE:
-                        write_client(
-                            {
-                                "jsonrpc": "2.0",
-                                "id": msg.get("id"),
-                                "error": {
-                                    "code": -32001,
-                                    "message": "Piton STDIO Lockfile Rug-Pull Blocked",
-                                    "data": ver.model_dump(mode="json"),
-                                },
-                            }
+                    if not ver.passed:
+                        if effective_mode == EnforcementMode.ENFORCE:
+                            write_client(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "id": msg.get("id"),
+                                    "error": {
+                                        "code": -32001,
+                                        "message": "Piton STDIO Lockfile Rug-Pull Blocked",
+                                        "data": ver.model_dump(mode="json"),
+                                    },
+                                }
+                            )
+                            continue
+                        sys.stderr.write(
+                            f"[piton-wrap][shadow] WARNING: tools/list drift on '{server_name}' "
+                            f"({ver.blocked_count} blocking); pass --enforce or set mode: enforce to block.\n"
                         )
-                        continue
+                        sys.stderr.flush()
             write_client(msg)
 
     reader_thread = threading.Thread(target=pump_upstream, daemon=True)
     reader_thread.start()
+
+    tool_call_counts: Dict[str, int] = {}
 
     try:
         for raw_line in client_in:
@@ -499,17 +521,19 @@ def wrap_stdio_mcp(
                 args = params.get("arguments") or {}
                 if not isinstance(args, dict):
                     args = {}
+                tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
                 ev = evaluate_tool_call_against_policy(
-                    config,
+                    effective_config,
                     server_name,
                     tool_name,
                     args,
                     obo_principal=os.getenv("PITON_LOCAL_PRINCIPAL", "user:local-dev"),
                     idempotency_key=args.get("idempotency_key") or f"stdio-{req_id}",
+                    trace_tool_call_count=tool_call_counts[tool_name],
                 )
                 if ledger is not None:
                     ledger.append_decision(
-                        config,
+                        effective_config,
                         lockfile,
                         traceparent=f"00-stdio-{req_id}-01",
                         server_name=server_name,
@@ -533,6 +557,13 @@ def wrap_stdio_mcp(
                         }
                     )
                     continue
+                if ev.verdict == DecisionVerdict.SHADOW_DENY:
+                    rules = ", ".join(v.rule_id for v in ev.violations) or "policy"
+                    sys.stderr.write(
+                        f"[piton-wrap][shadow] WARNING: '{server_name}.{tool_name}' violated [{rules}]; "
+                        "pass --enforce or set mode: enforce to block.\n"
+                    )
+                    sys.stderr.flush()
 
             proc.stdin.write(json.dumps(req) + "\n")
             proc.stdin.flush()

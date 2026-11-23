@@ -90,11 +90,11 @@ def generate_format_preserving_ghost_token(ghost_format: str, slot_name: str = "
     if fmt == "jwt":
         hdr = base64.urlsafe_b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()).decode().rstrip("=")
         payload = base64.urlsafe_b64encode(
-            json.dumps({"sub": f"prom_ghost_{slot_name}", "exp": 4102444800}).encode()
+            json.dumps({"sub": f"piton_ghost_{slot_name}", "exp": 4102444800}).encode()
         ).decode().rstrip("=")
         sig = base64.urlsafe_b64encode(f"pitonghost_{rand_hex}".encode()).decode().rstrip("=")
         return f"{hdr}.{payload}.{sig}"
-    return f"prom_ghost_{slot_name}_{rand_hex}"
+    return f"piton_ghost_{slot_name}_{rand_hex}"
 
 
 def _infer_trust_tier(server_name: str, url: Optional[str]) -> TrustTier:
@@ -102,8 +102,13 @@ def _infer_trust_tier(server_name: str, url: Optional[str]) -> TrustTier:
         host = (urlparse(url).hostname or "").lower()
         if host in ("localhost", "127.0.0.1", "::1") or host.endswith((".internal", ".local", ".corp", ".lan")):
             return TrustTier.INTERNAL
+        if ".internal." in host:
+            return TrustTier.INTERNAL
+        # Explicit external public URL -> always third_party unless host itself is internal
+        if host:
+            return TrustTier.THIRD_PARTY
     lower_name = server_name.lower()
-    if any(tok in lower_name for tok in ("internal", "local", "billing", "core")):
+    if any(tok in lower_name for tok in ("internal", "local")):
         return TrustTier.INTERNAL
     return TrustTier.THIRD_PARTY
 
@@ -291,6 +296,17 @@ def scan_repository(
     lockfile, poisoning_findings = build_lockfile_from_servers(
         servers_for_lock, allow_poisoned=allow_poisoned
     )
+
+    # Ensure Day-1 quarantined tools are also excluded from piton.yaml allowlist
+    if not allow_poisoned:
+        for srv_name, srv_pol in mcp_servers.items():
+            pinned_srv = lockfile.servers.get(srv_name)
+            if pinned_srv is not None:
+                srv_pol.tools = {
+                    tname: tpol
+                    for tname, tpol in srv_pol.tools.items()
+                    if tname in pinned_srv.tools
+                }
 
     config = AgentIaCConfig(
         version="1",

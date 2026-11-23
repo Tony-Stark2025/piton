@@ -10,11 +10,11 @@ inputs:
     required: false
     default: "."
   config:
-    description: "Path to piton.yaml (defaults to piton.yaml)"
+    description: "Path to piton.yaml"
     required: false
     default: "piton.yaml"
   lockfile:
-    description: "Path to piton.lock (defaults to piton.lock)"
+    description: "Path to piton.lock"
     required: false
     default: "piton.lock"
   manifest:
@@ -47,46 +47,56 @@ runs:
   using: "composite"
   steps:
     - name: Set up Python
-      uses: actions/setup-python@v5
+      # actions/setup-python@v5.6.0 pinned by full commit SHA
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
       with:
         python-version: ${{ inputs.python-version }}
 
     - name: Install Piton CLI (2-dep slim install)
       shell: bash
+      env:
+        PITON_ACTION_PATH: ${{ github.action_path }}
       run: |
         python -m pip install --upgrade pip >/dev/null
-        pip install --quiet "${{ github.action_path }}"
+        pip install --quiet "${PITON_ACTION_PATH}"
 
     - name: Run Piton Supply-Chain & MCP Lockfile Gate
       id: piton_gate
       shell: bash
+      env:
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_LOCKFILE: ${{ inputs.lockfile }}
+        INPUT_MANIFEST: ${{ inputs.manifest }}
+        INPUT_PROBE: ${{ inputs.probe }}
+        INPUT_PROBE_TIMEOUT: ${{ inputs.probe-timeout }}
+        INPUT_SCAN_ONLY: ${{ inputs.scan-only }}
       run: |
         set +e
-        SCAN_OUT="$(piton scan --repo "${{ inputs.repo }}" 2>&1)"
+        SCAN_OUT="$(piton scan --repo "${INPUT_REPO}" 2>&1)"
         SCAN_RC=$?
-        echo "${SCAN_OUT}"
+        printf '%s\n' "${SCAN_OUT}"
 
         LOCK_OUT=""
         LOCK_RC=0
-        if [ "${{ inputs.scan-only }}" != "true" ]; then
-          CFG="${{ inputs.config }}"
-          LOCK="${{ inputs.lockfile }}"
-          if [ -z "${CFG}" ]; then CFG="piton.yaml"; fi
-          if [ -z "${LOCK}" ]; then LOCK="piton.lock"; fi
+        if [ "${INPUT_SCAN_ONLY}" != "true" ]; then
+          CFG="${INPUT_CONFIG:-piton.yaml}"
+          LOCK="${INPUT_LOCKFILE:-piton.lock}"
 
-          CMD=(piton lock --config "${CFG}" --lockfile "${LOCK}" --repo "${{ inputs.repo }}" --diff)
-          if [ "${{ inputs.probe }}" = "true" ]; then
-            CMD+=(--probe --probe-timeout "${{ inputs.probe-timeout }}")
-          elif [ -n "${{ inputs.manifest }}" ]; then
-            CMD+=(--manifest "${{ inputs.manifest }}")
+          CMD=(piton lock --config "${CFG}" --lockfile "${LOCK}" --no-agent-scan --diff)
+          if [ "${INPUT_PROBE}" = "true" ]; then
+            CMD+=(--probe --probe-timeout "${INPUT_PROBE_TIMEOUT}")
+          elif [ -n "${INPUT_MANIFEST}" ]; then
+            CMD+=(--manifest "${INPUT_MANIFEST}")
           else
             echo "::error::Piton Lockfile Gate requires input 'manifest', 'probe: true', or 'scan-only: true'."
+            echo "exit_code=2" >> "${GITHUB_OUTPUT}"
             exit 2
           fi
 
           LOCK_OUT="$("${CMD[@]}" 2>&1)"
           LOCK_RC=$?
-          echo "${LOCK_OUT}"
+          printf '%s\n' "${LOCK_OUT}"
         fi
 
         FINAL_RC=0
@@ -103,13 +113,14 @@ runs:
             echo "**Status:** BLOCKED (scan_rc=${SCAN_RC}, lock_rc=${LOCK_RC})"
           fi
           echo ""
-          echo '```text'
-          echo "${SCAN_OUT}"
+          echo "### Static Agent Config & Rule Scan"
+          echo '~~~~text'
+          printf '%s\n' "${SCAN_OUT}"
+          echo '~~~~'
           if [ -n "${LOCK_OUT}" ]; then
             echo ""
-            echo "${LOCK_OUT}"
+            printf '%s\n' "${LOCK_OUT}"
           fi
-          echo '```'
         } >> "${GITHUB_STEP_SUMMARY}"
 
         exit "${FINAL_RC}"
