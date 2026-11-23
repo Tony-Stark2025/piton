@@ -137,3 +137,25 @@ jobs:
         with:
           generate_release_notes: true
           files: release-assets/*
+
+  publish-pypi:
+    name: Publish to PyPI (OIDC Trusted Publishing)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-python-wheel]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/piton-cli
+    permissions:
+      id-token: write
+    steps:
+      - name: Download Python Dist
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist-py/
+
+      - name: Publish distribution to PyPI via OIDC
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-py/
