@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -219,6 +221,7 @@ type Engine struct {
 	ledgerMu         sync.Mutex
 	traceCounts      map[string]traceCounter
 	seenIdemKeys     map[string]time.Time
+	usedMRTRNonces   map[string]time.Time
 	principalRolling map[string][]rollingSample
 	lastRecordMac    string
 }
@@ -280,6 +283,7 @@ func NewEngine(cfg AgentIaCConfig, lock *ManifestLockfile, ledgerPath string, si
 		tokenizerKey:     tokenizerKey,
 		traceCounts:      make(map[string]traceCounter),
 		seenIdemKeys:     make(map[string]time.Time),
+		usedMRTRNonces:   make(map[string]time.Time),
 		principalRolling: make(map[string][]rollingSample),
 		lastRecordMac:    "GENESIS",
 	}
@@ -372,31 +376,41 @@ func ExtractOBOPrincipal(hdr http.Header) string {
 // ============================================================================
 
 type MRTRStatePayload struct {
-	ServerName string `json:"server_name"`
-	ToolName   string `json:"tool_name"`
-	ArgsHash   string `json:"args_hash"`
-	Principal  string `json:"principal"`
-	ExpiresAt  int64  `json:"expires_at"`
-	Approved   bool   `json:"approved"`
+	JTI            string `json:"jti"`
+	ServerName     string `json:"server_name"`
+	ToolName       string `json:"tool_name"`
+	ArgsHash       string `json:"args_hash"`
+	Principal      string `json:"principal"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	ExpiresAt      int64  `json:"expires_at"`
+	Approved       bool   `json:"approved"`
 }
 
-func (e *Engine) MintMRTRState(serverName, toolName string, args map[string]any, principal string, approved bool) string {
+func (e *Engine) MintMRTRState(serverName, toolName string, args map[string]any, principal string, approved bool, idempotencyKey ...string) string {
 	ab, _ := canonicalJSON(args)
 	ah := sha256.Sum256(ab)
+	var jtiBytes [16]byte
+	_, _ = rand.Read(jtiBytes[:])
+	ik := ""
+	if len(idempotencyKey) > 0 {
+		ik = strings.TrimSpace(idempotencyKey[0])
+	}
 	st := MRTRStatePayload{
-		ServerName: serverName,
-		ToolName:   toolName,
-		ArgsHash:   hex.EncodeToString(ah[:]),
-		Principal:  principal,
-		ExpiresAt:  time.Now().Add(mrtrStateTTL).Unix(),
-		Approved:   approved,
+		JTI:            hex.EncodeToString(jtiBytes[:]),
+		ServerName:     serverName,
+		ToolName:       toolName,
+		ArgsHash:       hex.EncodeToString(ah[:]),
+		Principal:      principal,
+		IdempotencyKey: ik,
+		ExpiresAt:      time.Now().Add(mrtrStateTTL).Unix(),
+		Approved:       approved,
 	}
 	raw, _ := canonicalJSON(st)
 	mac := e.hmacHex(e.signingKey, string(raw), 32)
 	return base64.RawURLEncoding.EncodeToString(raw) + "." + mac
 }
 
-func (e *Engine) VerifyMRTRApprovalToken(token, serverName, toolName string, args map[string]any, principal string) bool {
+func (e *Engine) VerifyMRTRApprovalToken(token, serverName, toolName string, args map[string]any, principal string, idempotencyKey ...string) bool {
 	parts := strings.Split(strings.TrimSpace(token), ".")
 	if len(parts) != 2 {
 		return false
@@ -413,21 +427,51 @@ func (e *Engine) VerifyMRTRApprovalToken(token, serverName, toolName string, arg
 	if json.Unmarshal(raw, &st) != nil {
 		return false
 	}
-	if !st.Approved || time.Now().Unix() > st.ExpiresAt {
+	now := time.Now()
+	if !st.Approved || st.JTI == "" || now.Unix() > st.ExpiresAt {
 		return false
+	}
+	if st.IdempotencyKey != "" {
+		providedIK := ""
+		if len(idempotencyKey) > 0 {
+			providedIK = strings.TrimSpace(idempotencyKey[0])
+		}
+		if providedIK != st.IdempotencyKey {
+			return false
+		}
 	}
 	ab, _ := canonicalJSON(args)
 	ah := sha256.Sum256(ab)
-	return st.ServerName == serverName &&
-		st.ToolName == toolName &&
-		st.ArgsHash == hex.EncodeToString(ah[:]) &&
-		st.Principal == principal
+	if st.ServerName != serverName ||
+		st.ToolName != toolName ||
+		st.ArgsHash != hex.EncodeToString(ah[:]) ||
+		st.Principal != principal {
+		return false
+	}
+
+	// Single-use consumption: atomically burn `jti` so an approval token can never be replayed.
+	remainingTTL := time.Until(time.Unix(st.ExpiresAt, 0)) + time.Minute
+	if remainingTTL < time.Minute {
+		remainingTTL = mrtrStateTTL
+	}
+	if e.StateStore != nil {
+		acquired, err := e.StateStore.ConsumeMRTRNonce(st.JTI, remainingTTL)
+		return err == nil && acquired
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.pruneCachesLocked(now)
+	if exp, seen := e.usedMRTRNonces[st.JTI]; seen && now.Before(exp) {
+		return false
+	}
+	e.usedMRTRNonces[st.JTI] = time.Unix(st.ExpiresAt, 0).Add(time.Minute)
+	return true
 }
 
 // BuildMRTRInputRequiredPayload constructs a spec-compliant MCP 2026-07-28 MRTR
 // `input_required` result envelope with signed `requestState` for out-of-band approval.
-func (e *Engine) BuildMRTRInputRequiredPayload(reqID any, serverName, toolName string, args map[string]any, principal string, ev EvaluationResult) map[string]any {
-	stateToken := e.MintMRTRState(serverName, toolName, args, principal, false)
+func (e *Engine) BuildMRTRInputRequiredPayload(reqID any, serverName, toolName string, args map[string]any, principal string, ev EvaluationResult, idempotencyKey ...string) map[string]any {
+	stateToken := e.MintMRTRState(serverName, toolName, args, principal, false, idempotencyKey...)
 	if e.ControlPlane != nil {
 		tokArgs, _ := e.tokenizeValue("arguments", args).(map[string]any)
 		e.ControlPlane.EmitMRTREscalation(map[string]any{
@@ -483,6 +527,13 @@ func (e *Engine) pruneCachesLocked(now time.Time) {
 			}
 		}
 	}
+	if len(e.usedMRTRNonces) > maxTrackedIdemKeys {
+		for k, exp := range e.usedMRTRNonces {
+			if now.After(exp) || len(e.usedMRTRNonces) > maxTrackedIdemKeys {
+				delete(e.usedMRTRNonces, k)
+			}
+		}
+	}
 }
 
 // EvaluateToolCall deterministically enforces OBO principal, fail-closed server/tool allowlists,
@@ -533,14 +584,16 @@ func (e *Engine) EvaluateToolCall(
 	var idemScoped string
 	var rollingKey string
 	var rollingVal float64
+	var sumParam string
 	var trackRolling bool
+	var onExceed string
 	if hasTool {
-		onExceed := toolPolicy.OnBoundExceeded
+		onExceed = toolPolicy.OnBoundExceeded
 		if onExceed == "" {
 			onExceed = "mrtr_escalate"
 		}
 
-		// 2. Check idempotency key (committed ONLY if call is ultimately admitted!)
+		// 2. Validate presence of required idempotency key (atomic reservation happens once stateless checks pass)
 		if toolPolicy.IdempotencyKey == "required" {
 			if idempotencyKey == "" {
 				violations = append(violations, RuleViolation{
@@ -550,38 +603,10 @@ func (e *Engine) EvaluateToolCall(
 				})
 			} else {
 				idemScoped = serverName + "::" + toolName + "::" + idempotencyKey
-				if e.StateStore != nil {
-					exists, err := e.StateStore.CheckIdempotency(idemScoped)
-					if err != nil {
-						violations = append(violations, RuleViolation{
-							RuleID:            "SHARED_STATE_UNAVAILABLE",
-							Message:           fmt.Sprintf("Distributed Redis idempotency check failed: %v", err),
-							RecommendedAction: "block",
-						})
-					} else if exists {
-						violations = append(violations, RuleViolation{
-							RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
-							Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
-							ObservedValue:     idempotencyKey,
-							RecommendedAction: "block",
-						})
-					}
-				} else {
-					e.mu.Lock()
-					if ts, exists := e.seenIdemKeys[idemScoped]; exists && now.Sub(ts) <= idemEntryTTL {
-						violations = append(violations, RuleViolation{
-							RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
-							Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
-							ObservedValue:     idempotencyKey,
-							RecommendedAction: "block",
-						})
-					}
-					e.mu.Unlock()
-				}
 			}
 		}
 
-		// 3. Per-trace & rolling 1h per-principal cumulative budgets (kills cross-trace & multi-replica smurfing)
+		// 3. Per-trace counter & budget value validation
 		if toolPolicy.RateLimit != nil {
 			if toolPolicy.RateLimit.MaxCallsPerTrace != nil {
 				ck := traceparent + "::" + serverName + "::" + toolName
@@ -624,64 +649,22 @@ func (e *Engine) EvaluateToolCall(
 			if toolPolicy.RateLimit.MaxCallsPerHour != nil || toolPolicy.RateLimit.MaxSumPerHour != nil {
 				trackRolling = true
 				rollingKey = oboPrincipal + "::" + e.Config.Agent.ID + "::" + serverName + "::" + toolName
-				sumParam := toolPolicy.RateLimit.SumParameter
+				sumParam = toolPolicy.RateLimit.SumParameter
 				if sumParam == "" {
 					sumParam = "amount"
 				}
 				valNum, _ := toFloat64(arguments[sumParam])
+				if toolPolicy.RateLimit.MaxSumPerHour != nil && (math.IsNaN(valNum) || math.IsInf(valNum, 0) || valNum < 0) {
+					p := sumParam
+					violations = append(violations, RuleViolation{
+						RuleID:            "INVALID_BUDGET_AMOUNT",
+						Parameter:         &p,
+						Message:           fmt.Sprintf("Budget parameter '%s' must be a non-negative finite number.", sumParam),
+						ObservedValue:     arguments[sumParam],
+						RecommendedAction: "block",
+					})
+				}
 				rollingVal = valNum
-
-				var curCalls int
-				var curSum float64
-				var stateErr error
-				if e.StateStore != nil {
-					curCalls, curSum, stateErr = e.StateStore.GetRollingWindow(rollingKey, now, rollingWindowDur)
-					if stateErr != nil {
-						violations = append(violations, RuleViolation{
-							RuleID:            "SHARED_STATE_UNAVAILABLE",
-							Message:           fmt.Sprintf("Distributed Redis rolling-window check failed: %v", stateErr),
-							RecommendedAction: "block",
-						})
-					}
-				} else {
-					e.mu.Lock()
-					e.pruneCachesLocked(now)
-					samples := e.principalRolling[rollingKey]
-					cutoff := now.Add(-rollingWindowDur)
-					kept := samples[:0]
-					for _, s := range samples {
-						if s.At.After(cutoff) {
-							kept = append(kept, s)
-							curSum += s.Value
-						}
-					}
-					curCalls = len(kept)
-					e.principalRolling[rollingKey] = kept
-					e.mu.Unlock()
-				}
-				if stateErr == nil {
-					nextCalls := curCalls + 1
-					nextSum := curSum + valNum
-					if toolPolicy.RateLimit.MaxCallsPerHour != nil && nextCalls > *toolPolicy.RateLimit.MaxCallsPerHour {
-						violations = append(violations, RuleViolation{
-							RuleID:            "PRINCIPAL_HOURLY_CALLS_EXCEEDED",
-							Message:           fmt.Sprintf("Hourly call #%d for principal exceeds max_calls_per_hour=%d.", nextCalls, *toolPolicy.RateLimit.MaxCallsPerHour),
-							ObservedValue:     nextCalls,
-							ConfiguredBound:   *toolPolicy.RateLimit.MaxCallsPerHour,
-							RecommendedAction: onExceed,
-						})
-					}
-					if toolPolicy.RateLimit.MaxSumPerHour != nil && nextSum > *toolPolicy.RateLimit.MaxSumPerHour {
-						violations = append(violations, RuleViolation{
-							RuleID:            "PRINCIPAL_HOURLY_SUM_EXCEEDED",
-							Parameter:         &sumParam,
-							Message:           fmt.Sprintf("Cumulative 1h %s=%.2f exceeds max_sum_per_hour=%.2f.", sumParam, nextSum, *toolPolicy.RateLimit.MaxSumPerHour),
-							ObservedValue:     nextSum,
-							ConfiguredBound:   *toolPolicy.RateLimit.MaxSumPerHour,
-							RecommendedAction: onExceed,
-						})
-					}
-				}
 			}
 		}
 
@@ -704,52 +687,251 @@ func (e *Engine) EvaluateToolCall(
 		}
 	}
 
-	verdict := "allow"
-	if len(violations) > 0 {
+	computeVerdict := func(vs []RuleViolation) string {
+		if len(vs) == 0 {
+			return "allow"
+		}
 		if e.Config.Agent.Mode == "shadow" {
-			verdict = "shadow_deny"
-		} else {
-			verdict = "allow"
-			for _, v := range violations {
-				if v.RecommendedAction == "block" {
-					verdict = "deny"
-					break
-				}
-				if v.RecommendedAction == "mrtr_escalate" {
-					verdict = "mrtr_escalate"
-				}
+			return "shadow_deny"
+		}
+		v := "allow"
+		for _, item := range vs {
+			if item.RecommendedAction == "block" {
+				return "deny"
+			}
+			if item.RecommendedAction == "mrtr_escalate" {
+				v = "mrtr_escalate"
 			}
 		}
+		return v
 	}
 
-	// If MRTR escalation occurred AND caller supplied a cryptographically signed MRTR approval token
-	// matching this exact server/tool/arguments/principal, honor the human approval!
-	if verdict == "mrtr_escalate" && len(mrtrApprovalToken) > 0 && mrtrApprovalToken[0] != "" {
-		if e.VerifyMRTRApprovalToken(mrtrApprovalToken[0], serverName, toolName, arguments, oboPrincipal) {
-			verdict = "allow"
-			violations = []RuleViolation{}
+	verdict := computeVerdict(violations)
+
+	// 5. Atomic idempotency & rolling 1h budget check-and-reserve (eliminates TOCTOU races!)
+	mrtrTok := ""
+	if len(mrtrApprovalToken) > 0 {
+		mrtrTok = strings.TrimSpace(mrtrApprovalToken[0])
+	}
+
+	if hasTool && verdict != "deny" {
+		checkCalls := trackRolling && toolPolicy.RateLimit != nil && toolPolicy.RateLimit.MaxCallsPerHour != nil
+		checkSum := trackRolling && toolPolicy.RateLimit != nil && toolPolicy.RateLimit.MaxSumPerHour != nil
+		maxCalls := 0
+		if checkCalls {
+			maxCalls = *toolPolicy.RateLimit.MaxCallsPerHour
 		}
-	}
+		maxSum := 0.0
+		if checkSum {
+			maxSum = *toolPolicy.RateLimit.MaxSumPerHour
+		}
 
-	// Commit rolling-window sample & idempotency key ONLY if call is admitted (never burn keys/budgets on rejected calls)
-	if verdict == "allow" {
-		if trackRolling {
-			if e.StateStore != nil {
-				_ = e.StateStore.RecordRollingSample(rollingKey, now, rollingWindowDur, rollingVal)
-			} else {
-				e.mu.Lock()
-				e.principalRolling[rollingKey] = append(e.principalRolling[rollingKey], rollingSample{At: now, Value: rollingVal})
-				e.mu.Unlock()
+		mrtrApproved := false
+		if verdict == "mrtr_escalate" && mrtrTok != "" {
+			if e.VerifyMRTRApprovalToken(mrtrTok, serverName, toolName, arguments, oboPrincipal, idempotencyKey) {
+				mrtrApproved = true
+				violations = []RuleViolation{}
+				verdict = "allow"
 			}
 		}
-		if idemScoped != "" && e.Config.Agent.Mode == "enforce" {
+
+		if verdict == "allow" || verdict == "shadow_deny" {
 			if e.StateStore != nil {
-				_ = e.StateStore.CommitIdempotency(idemScoped, idemEntryTTL)
+				if trackRolling {
+					if mrtrApproved {
+						if err := e.StateStore.RecordRollingSample(rollingKey, now, rollingWindowDur, rollingVal); err != nil {
+							violations = append(violations, RuleViolation{
+								RuleID:            "SHARED_STATE_UNAVAILABLE",
+								Message:           fmt.Sprintf("Distributed Redis rolling-window record failed: %v", err),
+								RecommendedAction: "block",
+							})
+						}
+					} else if verdict == "allow" {
+						nextCalls, nextSum, allowed, err := e.StateStore.CheckAndRecordRollingWindow(
+							rollingKey, now, rollingWindowDur, rollingVal, maxCalls, maxSum, checkCalls, checkSum,
+						)
+						if err != nil {
+							violations = append(violations, RuleViolation{
+								RuleID:            "SHARED_STATE_UNAVAILABLE",
+								Message:           fmt.Sprintf("Distributed Redis rolling-window check failed: %v", err),
+								RecommendedAction: "block",
+							})
+						} else if !allowed {
+							if checkCalls && nextCalls > maxCalls {
+								violations = append(violations, RuleViolation{
+									RuleID:            "PRINCIPAL_HOURLY_CALLS_EXCEEDED",
+									Message:           fmt.Sprintf("Hourly call #%d for principal exceeds max_calls_per_hour=%d.", nextCalls, maxCalls),
+									ObservedValue:     nextCalls,
+									ConfiguredBound:   maxCalls,
+									RecommendedAction: onExceed,
+								})
+							}
+							if checkSum && nextSum > maxSum {
+								p := sumParam
+								violations = append(violations, RuleViolation{
+									RuleID:            "PRINCIPAL_HOURLY_SUM_EXCEEDED",
+									Parameter:         &p,
+									Message:           fmt.Sprintf("Cumulative 1h %s=%.2f exceeds max_sum_per_hour=%.2f.", sumParam, nextSum, maxSum),
+									ObservedValue:     nextSum,
+									ConfiguredBound:   maxSum,
+									RecommendedAction: onExceed,
+								})
+							}
+						}
+					} else {
+						curCalls, curSum, err := e.StateStore.GetRollingWindow(rollingKey, now, rollingWindowDur)
+						if err == nil {
+							if checkCalls && curCalls+1 > maxCalls {
+								violations = append(violations, RuleViolation{
+									RuleID:            "PRINCIPAL_HOURLY_CALLS_EXCEEDED",
+									Message:           fmt.Sprintf("Hourly call #%d for principal exceeds max_calls_per_hour=%d.", curCalls+1, maxCalls),
+									ObservedValue:     curCalls + 1,
+									ConfiguredBound:   maxCalls,
+									RecommendedAction: onExceed,
+								})
+							}
+							if checkSum && curSum+rollingVal > maxSum {
+								p := sumParam
+								violations = append(violations, RuleViolation{
+									RuleID:            "PRINCIPAL_HOURLY_SUM_EXCEEDED",
+									Parameter:         &p,
+									Message:           fmt.Sprintf("Cumulative 1h %s=%.2f exceeds max_sum_per_hour=%.2f.", sumParam, curSum+rollingVal, maxSum),
+									ObservedValue:     curSum + rollingVal,
+									ConfiguredBound:   maxSum,
+									RecommendedAction: onExceed,
+								})
+							}
+						}
+					}
+					verdict = computeVerdict(violations)
+					if verdict == "mrtr_escalate" && !mrtrApproved && mrtrTok != "" {
+						if e.VerifyMRTRApprovalToken(mrtrTok, serverName, toolName, arguments, oboPrincipal, idempotencyKey) {
+							mrtrApproved = true
+							violations = []RuleViolation{}
+							verdict = "allow"
+							_ = e.StateStore.RecordRollingSample(rollingKey, now, rollingWindowDur, rollingVal)
+						}
+					}
+				}
+
+				if idemScoped != "" && verdict == "allow" && e.Config.Agent.Mode == "enforce" {
+					acquired, err := e.StateStore.ReserveIdempotency(idemScoped, idemEntryTTL)
+					if err != nil {
+						violations = append(violations, RuleViolation{
+							RuleID:            "SHARED_STATE_UNAVAILABLE",
+							Message:           fmt.Sprintf("Distributed Redis idempotency reserve failed: %v", err),
+							RecommendedAction: "block",
+						})
+					} else if !acquired {
+						violations = append(violations, RuleViolation{
+							RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
+							Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
+							ObservedValue:     idempotencyKey,
+							RecommendedAction: "block",
+						})
+					}
+					verdict = computeVerdict(violations)
+				}
 			} else {
 				e.mu.Lock()
 				e.pruneCachesLocked(now)
-				e.seenIdemKeys[idemScoped] = now
-				e.mu.Unlock()
+
+				dupIdem := false
+				if idemScoped != "" {
+					if ts, exists := e.seenIdemKeys[idemScoped]; exists && now.Sub(ts) <= idemEntryTTL {
+						dupIdem = true
+						violations = append(violations, RuleViolation{
+							RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
+							Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
+							ObservedValue:     idempotencyKey,
+							RecommendedAction: "block",
+						})
+					}
+				}
+
+				if !dupIdem && trackRolling {
+					samples := e.principalRolling[rollingKey]
+					cutoff := now.Add(-rollingWindowDur)
+					kept := samples[:0]
+					var curSum float64
+					for _, s := range samples {
+						if s.At.After(cutoff) {
+							kept = append(kept, s)
+							curSum += s.Value
+						}
+					}
+					e.principalRolling[rollingKey] = kept
+					nextCalls := len(kept) + 1
+					nextSum := curSum + rollingVal
+					if !mrtrApproved {
+						if checkCalls && nextCalls > maxCalls {
+							violations = append(violations, RuleViolation{
+								RuleID:            "PRINCIPAL_HOURLY_CALLS_EXCEEDED",
+								Message:           fmt.Sprintf("Hourly call #%d for principal exceeds max_calls_per_hour=%d.", nextCalls, maxCalls),
+								ObservedValue:     nextCalls,
+								ConfiguredBound:   maxCalls,
+								RecommendedAction: onExceed,
+							})
+						}
+						if checkSum && nextSum > maxSum {
+							p := sumParam
+							violations = append(violations, RuleViolation{
+								RuleID:            "PRINCIPAL_HOURLY_SUM_EXCEEDED",
+								Parameter:         &p,
+								Message:           fmt.Sprintf("Cumulative 1h %s=%.2f exceeds max_sum_per_hour=%.2f.", sumParam, nextSum, maxSum),
+								ObservedValue:     nextSum,
+								ConfiguredBound:   maxSum,
+								RecommendedAction: onExceed,
+							})
+						}
+					}
+				}
+
+				verdict = computeVerdict(violations)
+
+				if !dupIdem && verdict == "mrtr_escalate" && !mrtrApproved && mrtrTok != "" {
+					e.mu.Unlock()
+					if e.VerifyMRTRApprovalToken(mrtrTok, serverName, toolName, arguments, oboPrincipal, idempotencyKey) {
+						e.mu.Lock()
+						e.pruneCachesLocked(now)
+						if idemScoped != "" {
+							if ts, exists := e.seenIdemKeys[idemScoped]; exists && now.Sub(ts) <= idemEntryTTL {
+								violations = append(violations, RuleViolation{
+									RuleID:            "DUPLICATE_IDEMPOTENCY_KEY",
+									Message:           fmt.Sprintf("Idempotency key '%s' was already executed for '%s.%s'.", idempotencyKey, serverName, toolName),
+									ObservedValue:     idempotencyKey,
+									RecommendedAction: "block",
+								})
+								verdict = computeVerdict(violations)
+							} else {
+								violations = []RuleViolation{}
+								verdict = "allow"
+							}
+						} else {
+							violations = []RuleViolation{}
+							verdict = "allow"
+						}
+						if verdict == "allow" {
+							if trackRolling {
+								e.principalRolling[rollingKey] = append(e.principalRolling[rollingKey], rollingSample{At: now, Value: rollingVal})
+							}
+							if idemScoped != "" && e.Config.Agent.Mode == "enforce" {
+								e.seenIdemKeys[idemScoped] = now
+							}
+						}
+						e.mu.Unlock()
+					}
+				} else {
+					if verdict == "allow" {
+						if trackRolling {
+							e.principalRolling[rollingKey] = append(e.principalRolling[rollingKey], rollingSample{At: now, Value: rollingVal})
+						}
+						if idemScoped != "" && e.Config.Agent.Mode == "enforce" {
+							e.seenIdemKeys[idemScoped] = now
+						}
+					}
+					e.mu.Unlock()
+				}
 			}
 		}
 	}
@@ -872,7 +1054,16 @@ func checkParamBound(paramName string, val any, bound ParameterBound, onExceed s
 				})
 			}
 			if bound.Regex != "" {
-				if re, err := regexp.Compile(bound.Regex); err == nil && !re.MatchString(strVal) {
+				re, err := regexp.Compile(bound.Regex)
+				if err != nil {
+					out = append(out, RuleViolation{
+						RuleID:            "INVALID_POLICY_REGEX",
+						Parameter:         &paramName,
+						Message:           fmt.Sprintf("Parameter '%s' has invalid RE2 regex bound (failing closed): %v", paramName, err),
+						ConfiguredBound:   bound.Regex,
+						RecommendedAction: "block",
+					})
+				} else if !re.MatchString(strVal) {
 					out = append(out, RuleViolation{
 						RuleID:            "PARAM_REGEX_MISMATCH",
 						Parameter:         &paramName,
@@ -935,7 +1126,7 @@ type ManifestDrift struct {
 }
 
 var (
-	invisibleUnicodeRE = regexp.MustCompile("[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]")
+	invisibleUnicodeRE = regexp.MustCompile("[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff\U000e0000-\U000e007f]")
 	goPoisonRules      = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)(ignore\s+(all\s+)?(previous|prior|above)\s+instructions?|disregard\s+(all\s+)?(previous|prior)|new\s+system\s+prompt)`),
 		regexp.MustCompile(`(?i)(do\s+not\s+(tell|inform|mention|show|notify)\s+the\s+user|silently\s+(send|forward|copy|bcc|exfiltrate|execute)|<\s*IMPORTANT\s*>|<\s*SYSTEM\s*>)`),

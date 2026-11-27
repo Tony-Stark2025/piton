@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -56,12 +57,16 @@ func headerMapToHTTP(hm *corev3.HeaderMap) http.Header {
 
 // extractMCPServerFromPath derives the MCP server strictly from Envoy's routed `:path`
 // (`/mcp/{server}`) and NEVER trusts client-supplied `X-MCP-Server` headers.
-func extractMCPServerFromPath(path string) string {
-	clean := strings.Split(path, "?")[0]
+func extractMCPServerFromPath(rawPath string) string {
+	clean := strings.Split(rawPath, "?")[0]
+	if clean != "" {
+		// Normalize duplicate slashes or dot segments before extracting server name.
+		clean = filepath.ToSlash(filepath.Clean(clean))
+	}
 	if strings.HasPrefix(clean, "/mcp/") {
 		rest := strings.TrimPrefix(clean, "/mcp/")
 		parts := strings.SplitN(rest, "/", 2)
-		if len(parts) > 0 && parts[0] != "" {
+		if len(parts) > 0 && parts[0] != "" && parts[0] != "." && parts[0] != ".." {
 			return parts[0]
 		}
 	}
@@ -170,7 +175,8 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 			}
 
 		case *ext_procv3.ProcessingRequest_RequestBody:
-			body := bytes.TrimSpace(phase.RequestBody.GetBody())
+			rawBody := bytes.TrimPrefix(phase.RequestBody.GetBody(), []byte{0xef, 0xbb, 0xbf})
+			body := bytes.TrimSpace(rawBody)
 			// Fail closed on JSON-RPC batch arrays `[...]`
 			if len(body) > 0 && body[0] == '[' {
 				if err := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(nil, -32600, "JSON-RPC batch requests are not permitted by Piton policy", nil))); err != nil {
@@ -185,7 +191,17 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 				Method  string         `json:"method"`
 				Params  map[string]any `json:"params"`
 			}
-			if len(body) > 0 && json.Unmarshal(body, &rpcReq) == nil && rpcReq.Method != "" {
+			if len(body) > 0 {
+				if err := json.Unmarshal(body, &rpcReq); err != nil {
+					if st.serverName != "" {
+						if sendErr := stream.Send(immediateJSONResponse(jsonRPCErrorPayload(nil, -32700, "Malformed JSON-RPC request body rejected by Piton policy", nil))); sendErr != nil {
+							return sendErr
+						}
+						continue
+					}
+				}
+			}
+			if len(body) > 0 && rpcReq.Method != "" {
 				st.rpcMethod = rpcReq.Method
 				st.rpcID = rpcReq.ID
 
@@ -242,7 +258,7 @@ func (s *Server) Process(stream ext_procv3.ExternalProcessor_ProcessServer) erro
 						continue
 					}
 					if ev.Verdict == "mrtr_escalate" {
-						mrtrPayload := s.Engine.BuildMRTRInputRequiredPayload(rpcReq.ID, st.serverName, toolName, argsMap, oboPrincipal, ev)
+						mrtrPayload := s.Engine.BuildMRTRInputRequiredPayload(rpcReq.ID, st.serverName, toolName, argsMap, oboPrincipal, ev, idemKey)
 						if err := stream.Send(immediateJSONResponse(mrtrPayload)); err != nil {
 							return err
 						}

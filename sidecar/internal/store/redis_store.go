@@ -24,9 +24,21 @@ import (
 type DistributedStore interface {
 	CheckIdempotency(key string) (bool, error)
 	CommitIdempotency(key string, ttl time.Duration) error
+	ReserveIdempotency(key string, ttl time.Duration) (acquired bool, err error)
+	ConsumeMRTRNonce(jti string, ttl time.Duration) (acquired bool, err error)
 	IncrTraceCount(key string, ttl time.Duration) (int, error)
 	GetRollingWindow(key string, now time.Time, window time.Duration) (calls int, sum float64, err error)
 	RecordRollingSample(key string, now time.Time, window time.Duration, value float64) error
+	CheckAndRecordRollingWindow(
+		key string,
+		now time.Time,
+		window time.Duration,
+		value float64,
+		maxCalls int,
+		maxSum float64,
+		checkCalls bool,
+		checkSum bool,
+	) (nextCalls int, nextSum float64, allowed bool, err error)
 	Ping() error
 }
 
@@ -205,12 +217,41 @@ func (rs *RedisStore) CheckIdempotency(key string) (bool, error) {
 }
 
 func (rs *RedisStore) CommitIdempotency(key string, ttl time.Duration) error {
+	_, err := rs.ReserveIdempotency(key, ttl)
+	return err
+}
+
+// ReserveIdempotency atomically acquires an idempotency key via Redis `SET ... EX ... NX`.
+// Returns acquired=true ONLY for the single winning caller across all replicas.
+func (rs *RedisStore) ReserveIdempotency(key string, ttl time.Duration) (bool, error) {
 	secs := int(ttl.Seconds())
 	if secs < 1 {
 		secs = 1
 	}
-	_, err := rs.Do("SET", rs.prefix+"idem:"+key, "1", "EX", strconv.Itoa(secs), "NX")
-	return err
+	v, err := rs.Do("SET", rs.prefix+"idem:"+key, "1", "EX", strconv.Itoa(secs), "NX")
+	if err != nil {
+		return false, err
+	}
+	if s, ok := v.(string); ok && strings.EqualFold(s, "OK") {
+		return true, nil
+	}
+	return false, nil
+}
+
+// ConsumeMRTRNonce atomically marks a single-use MRTR approval `jti` as consumed.
+func (rs *RedisStore) ConsumeMRTRNonce(jti string, ttl time.Duration) (bool, error) {
+	secs := int(ttl.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	v, err := rs.Do("SET", rs.prefix+"mrtr:"+jti, "1", "EX", strconv.Itoa(secs), "NX")
+	if err != nil {
+		return false, err
+	}
+	if s, ok := v.(string); ok && strings.EqualFold(s, "OK") {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (rs *RedisStore) IncrTraceCount(key string, ttl time.Duration) (int, error) {
@@ -274,4 +315,93 @@ func (rs *RedisStore) RecordRollingSample(key string, now time.Time, window time
 	secs := int(window.Seconds()) + 60
 	_, _ = rs.Do("EXPIRE", full, strconv.Itoa(secs))
 	return nil
+}
+
+const rollingWindowLuaScript = `
+local key = KEYS[1]
+local cutoff_ms = tonumber(ARGV[1])
+local now_ms = tonumber(ARGV[2])
+local member = ARGV[3]
+local val = tonumber(ARGV[4])
+local check_calls = tonumber(ARGV[5])
+local max_calls = tonumber(ARGV[6])
+local check_sum = tonumber(ARGV[7])
+local max_sum = tonumber(ARGV[8])
+local ttl_secs = tonumber(ARGV[9])
+
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff_ms)
+local items = redis.call('ZRANGE', key, 0, -1)
+local cur_calls = #items
+local cur_sum = 0.0
+for _, item in ipairs(items) do
+  local colon = string.find(item, ':[^:]*$')
+  if colon then
+    local n = tonumber(string.sub(item, colon + 1))
+    if n then cur_sum = cur_sum + n end
+  end
+end
+local next_calls = cur_calls + 1
+local next_sum = cur_sum + val
+if (check_calls == 1 and next_calls > max_calls) or (check_sum == 1 and next_sum > max_sum) then
+  return {0, next_calls, string.format('%.6f', next_sum)}
+end
+redis.call('ZADD', key, now_ms, member)
+redis.call('EXPIRE', key, ttl_secs)
+return {1, next_calls, string.format('%.6f', next_sum)}
+`
+
+// CheckAndRecordRollingWindow atomically prunes, checks hourly call/sum bounds, and
+// records the sample in Redis via a single Lua EVAL (eliminates concurrent TOCTOU races).
+func (rs *RedisStore) CheckAndRecordRollingWindow(
+	key string,
+	now time.Time,
+	window time.Duration,
+	value float64,
+	maxCalls int,
+	maxSum float64,
+	checkCalls bool,
+	checkSum bool,
+) (int, float64, bool, error) {
+	full := rs.prefix + "roll:" + key
+	cutoffMs := now.Add(-window).UnixMilli()
+	nowMs := now.UnixMilli()
+	var nonce [8]byte
+	_, _ = rand.Read(nonce[:])
+	member := fmt.Sprintf("%s:%.6f", hex.EncodeToString(nonce[:]), value)
+	cc := "0"
+	if checkCalls {
+		cc = "1"
+	}
+	cs := "0"
+	if checkSum {
+		cs = "1"
+	}
+	ttlSecs := int(window.Seconds()) + 60
+	v, err := rs.Do(
+		"EVAL",
+		rollingWindowLuaScript,
+		"1",
+		full,
+		strconv.FormatInt(cutoffMs, 10),
+		strconv.FormatInt(nowMs, 10),
+		member,
+		fmt.Sprintf("%.6f", value),
+		cc,
+		strconv.Itoa(maxCalls),
+		cs,
+		fmt.Sprintf("%.6f", maxSum),
+		strconv.Itoa(ttlSecs),
+	)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	arr, ok := v.([]any)
+	if !ok || len(arr) < 3 {
+		return 0, 0, false, errors.New("unexpected redis EVAL response for rolling window")
+	}
+	allowedInt, _ := arr[0].(int64)
+	nextCallsInt, _ := arr[1].(int64)
+	nextSumStr, _ := arr[2].(string)
+	nextSum, _ := strconv.ParseFloat(nextSumStr, 64)
+	return int(nextCallsInt), nextSum, allowedInt == 1, nil
 }

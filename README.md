@@ -10,7 +10,7 @@
 
 > Don't wrap your agents in a probabilistic prompt firewall. Hammer deterministic split-hash pins into every MCP tool, Claude/Cursor hook, and schema.
 
-![Piton CLI Live Demo — piton scan, piton init, piton lock --diff, and piton replay exporting Cedar](docs/piton_demo.gif)
+![Piton CLI Live Demo — piton scan, piton init, piton lock --diff, and piton replay exporting Cedar](https://raw.githubusercontent.com/Tony-Stark2025/piton/main/docs/piton_demo.gif)
 
 Every AI coding agent (`Claude Code`, `Cursor`, `Claude Desktop`, `OpenCode`) now pulls unpinned third-party MCP tool descriptions, executes `.claude/settings.json` shell hooks, and ingests `.cursor/rules` / skill markdown files straight into privileged developer sessions. One silent upstream description edit (an MCP rug pull) or a malicious PR hook turns your repo into instant RCE.
 
@@ -29,15 +29,15 @@ uvx piton-cli scan --repo .
 # Or test it right now against our intentionally poisoned demo repo (catches 8 CRITICAL/HIGH findings in <1s):
 git clone https://github.com/Tony-Stark2025/piton-vuln-demo.git && uvx piton-cli scan --repo piton-vuln-demo
 
-# Or install permanently via pipx / pip:
+# Or install permanently via pipx / pip (note: install `piton-cli`, not unrelated PyPI package `piton`):
 pipx install piton-cli   # or: pip install piton-cli
 
 # 1. Zero-config scan: catches .claude/settings.json hook RCE, .vscode/tasks.json folderOpen autorun,
 #    malicious STDIO MCP commands, and hidden-Unicode / prompt-injection poisoning in .cursor/rules & CLAUDE.md
 piton scan --repo .
 
-# 2. Pin every MCP server with split SHA-256 hashes (probing live HTTP/SSE & STDIO servers)
-#    Quarantines Day-1 poisoned tools before writing piton.yaml + piton.lock
+# 2. Pin HTTP/SSE MCP servers with split SHA-256 hashes (add --allow-stdio-exec to also probe trusted local STDIO servers)
+#    Runs static supply-chain scan first and quarantines Day-1 poisoned servers/tools before writing piton.yaml + piton.lock
 piton init --repo . --probe
 
 # 3. Wrap any local STDIO MCP server in Cursor / Claude Code to block live rug pulls & over-bounds calls

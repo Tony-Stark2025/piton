@@ -70,12 +70,17 @@ DASHBOARD_HTML = """<!doctype html>
   <header>
     <h1><span>PITON</span> Enterprise Control Plane</h1>
     <div class="actions">
+      <input id="apiKey" type="password" placeholder="X-Piton-Control-Key" autocomplete="off" />
       <input id="approver" value="secops@acme.com" placeholder="Approver email" />
       <button class="secondary" onclick="refreshAll()">Refresh</button>
       <button onclick="exportAudit()">Export Signed SOC2 Audit</button>
     </div>
   </header>
   <main>
+    <section id="authBanner" class="card" style="display:none;border-color:var(--bad);">
+      <strong style="color:var(--bad);">Authentication required (401):</strong>
+      <span class="muted">Enter your <code>PITON_CONTROL_API_KEY</code> in the top bar and click Refresh.</span>
+    </section>
     <section class="card">
       <h2>Pending &amp; Recent MRTR Human Approvals <span id="pendingCount" class="pill warn">0 pending</span></h2>
       <table>
@@ -110,9 +115,29 @@ DASHBOARD_HTML = """<!doctype html>
   </main>
   <script>
     function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    const apiKeyInput = document.getElementById('apiKey');
+    apiKeyInput.value = sessionStorage.getItem('piton_control_api_key') || '';
+    apiKeyInput.addEventListener('change', () => {
+      sessionStorage.setItem('piton_control_api_key', apiKeyInput.value.trim());
+    });
+    function authHeaders(extra) {
+      const h = Object.assign({}, extra || {});
+      const key = (apiKeyInput.value || '').trim();
+      if (key) h['X-Piton-Control-Key'] = key;
+      return h;
+    }
+    async function apiFetchJson(url, opts) {
+      const res = await fetch(url, Object.assign({}, opts || {}, { headers: authHeaders((opts && opts.headers) || {}) }));
+      if (res.status === 401) {
+        document.getElementById('authBanner').style.display = 'block';
+        throw new Error('unauthorized');
+      }
+      document.getElementById('authBanner').style.display = 'none';
+      return res.json();
+    }
     async function decide(id, action) {
       const approver = document.getElementById('approver').value || 'secops@acme.com';
-      await fetch(`/api/v1/mrtr/approvals/${encodeURIComponent(id)}/${action}`, {
+      await apiFetchJson(`/api/v1/mrtr/approvals/${encodeURIComponent(id)}/${action}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Approver-Email': approver },
         body: JSON.stringify({ approver })
@@ -120,8 +145,7 @@ DASHBOARD_HTML = """<!doctype html>
       await refreshAll();
     }
     async function exportAudit() {
-      const res = await fetch('/api/v1/audit/export');
-      const data = await res.json();
+      const data = await apiFetchJson('/api/v1/audit/export');
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
@@ -129,12 +153,17 @@ DASHBOARD_HTML = """<!doctype html>
       a.click();
     }
     async function refreshAll() {
-      const [mrtr, fleet, drifts, ledger] = await Promise.all([
-        fetch('/api/v1/mrtr/approvals').then(r => r.json()),
-        fetch('/api/v1/fleet/readiness').then(r => r.json()),
-        fetch('/api/v1/drift/events').then(r => r.json()),
-        fetch('/api/v1/ledger/recent').then(r => r.json()),
-      ]);
+      let mrtr, fleet, drifts, ledger;
+      try {
+        [mrtr, fleet, drifts, ledger] = await Promise.all([
+          apiFetchJson('/api/v1/mrtr/approvals'),
+          apiFetchJson('/api/v1/fleet/readiness'),
+          apiFetchJson('/api/v1/drift/events'),
+          apiFetchJson('/api/v1/ledger/recent'),
+        ]);
+      } catch (_) {
+        return;
+      }
       const pending = (mrtr.approvals || []).filter(a => a.status === 'pending').length;
       document.getElementById('pendingCount').textContent = `${pending} pending`;
       document.getElementById('mrtrBody').innerHTML = (mrtr.approvals || []).length ? mrtr.approvals.map(a => `
@@ -346,6 +375,11 @@ def create_control_plane_server(
 
             if not self._check_api_key():
                 self._send_json(401, {"error": "unauthorized"})
+                return
+
+            ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                self._send_json(415, {"error": "unsupported_media_type_require_application_json"})
                 return
 
             try:

@@ -151,10 +151,16 @@ func (s *Server) handleGatewayProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use EscapedPath so `%23`/`%3f`/`..` cannot smuggle fragments, query injection, or traversal
+	// Use EscapedPath so `%23`/`%3f`/`%2e`/`%2f`/`%5c`/`..` cannot smuggle fragments, query injection, or traversal
 	escaped := r.URL.EscapedPath()
 	lowerEsc := strings.ToLower(escaped)
-	if strings.Contains(lowerEsc, "%23") || strings.Contains(lowerEsc, "%3f") || strings.Contains(escaped, "..") || strings.Contains(escaped, "@") {
+	if strings.Contains(lowerEsc, "%23") ||
+		strings.Contains(lowerEsc, "%3f") ||
+		strings.Contains(lowerEsc, "%2e") ||
+		strings.Contains(lowerEsc, "%2f") ||
+		strings.Contains(lowerEsc, "%5c") ||
+		strings.Contains(escaped, "..") ||
+		strings.Contains(escaped, "@") {
 		http.Error(w, `{"error":"unsafe_encoded_path"}`, http.StatusForbidden)
 		return
 	}
@@ -365,7 +371,7 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	trimmedBody := bytes.TrimSpace(bodyBytes)
+	trimmedBody := bytes.TrimSpace(bytes.TrimPrefix(bodyBytes, []byte{0xef, 0xbb, 0xbf}))
 	if len(trimmedBody) > 0 && trimmedBody[0] == '[' {
 		writeJSONRPCError(w, nil, -32600, "JSON-RPC batch requests are not permitted by Piton policy", nil)
 		return
@@ -417,12 +423,12 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 		if ev.Verdict == "mrtr_escalate" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(s.Engine.BuildMRTRInputRequiredPayload(rpcReq.ID, serverName, toolName, argsMap, oboPrincipal, ev))
+			_ = json.NewEncoder(w).Encode(s.Engine.BuildMRTRInputRequiredPayload(rpcReq.ID, serverName, toolName, argsMap, oboPrincipal, ev, idemKey))
 			return
 		}
 	}
 
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, srvCfg.URL, bytes.NewReader(bodyBytes))
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, srvCfg.URL, bytes.NewReader(trimmedBody))
 	if err != nil {
 		http.Error(w, `{"error":"mcp_upstream_build_failed"}`, http.StatusBadGateway)
 		return
@@ -432,6 +438,9 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 	upReq.Header.Set("MCP-Protocol-Version", "2026-07-28")
 	upReq.Header.Set("Mcp-Method", rpcReq.Method)
 	upReq.Header.Set("traceparent", traceparent)
+	if sid := r.Header.Get("Mcp-Session-Id"); sid != "" {
+		upReq.Header.Set("Mcp-Session-Id", sid)
+	}
 	if auth := r.Header.Get("Authorization"); auth != "" {
 		upReq.Header.Set("Authorization", auth)
 	}
@@ -488,6 +497,9 @@ func (s *Server) handleMCPProxy(w http.ResponseWriter, r *http.Request) {
 
 	if respContentType == "" {
 		respContentType = "application/json"
+	}
+	if upSid := upResp.Header.Get("Mcp-Session-Id"); upSid != "" {
+		w.Header().Set("Mcp-Session-Id", upSid)
 	}
 	w.Header().Set("Content-Type", respContentType)
 	w.WriteHeader(upResp.StatusCode)
