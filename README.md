@@ -1,5 +1,11 @@
 # Piton
 
+[![PyPI version](https://img.shields.io/pypi/v/piton-cli?color=f97316&label=PyPI)](https://pypi.org/project/piton-cli/)
+[![Piton CI Pipeline](https://github.com/Tony-Stark2025/piton/actions/workflows/ci.yml/badge.svg)](https://github.com/Tony-Stark2025/piton/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Tony-Stark2025/piton?color=0ea5e9)](https://github.com/Tony-Stark2025/piton/releases)
+[![GHCR Sidecar](https://img.shields.io/badge/GHCR-piton--sidecar-2563eb?logo=docker&logoColor=white)](https://github.com/Tony-Stark2025/piton/pkgs/container/piton-sidecar)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg)](LICENSE)
+
 **Lockfile and static supply-chain scanner for MCP servers, Claude Code hooks, and Cursor rules.**
 
 > Don't wrap your agents in a probabilistic prompt firewall. Hammer deterministic split-hash pins into every MCP tool, Claude/Cursor hook, and schema.
@@ -19,6 +25,9 @@ Slim Python CLI — **only 2 runtime dependencies (`pydantic` + `pyyaml`)**:
 ```bash
 # Zero-install instant scan (works anywhere with uv):
 uvx piton-cli scan --repo .
+
+# Or test it right now against our intentionally poisoned demo repo (catches 8 CRITICAL/HIGH findings in <1s):
+git clone https://github.com/Tony-Stark2025/piton-vuln-demo.git && uvx piton-cli scan --repo piton-vuln-demo
 
 # Or install permanently via pipx / pip:
 pipx install piton-cli   # or: pip install piton-cli

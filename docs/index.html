@@ -3,75 +3,199 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Piton — Lockfile and Static Supply-Chain Scanner for MCP Servers &amp; Coding Agents</title>
+  <title>Piton — Lockfile &amp; Supply-Chain Scanner for MCP Servers &amp; Coding Agents</title>
   <meta name="description" content="Pin MCP tool schemas and descriptions with split SHA-256 hashes, catch Claude Code and Cursor hook RCE in CI, and export calibrated CEL/Cedar policies." />
+  <link rel="canonical" href="https://tony-stark2025.github.io/piton/" />
+
+  <!-- OpenGraph / Social Preview -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Piton by Gaussian Labs" />
+  <meta property="og:url" content="https://tony-stark2025.github.io/piton/" />
+  <meta property="og:title" content="Piton — The Lockfile for MCP &amp; AI Coding Agents" />
+  <meta property="og:description" content="Deterministic split SHA-256 pinning, Claude &amp; Cursor hook RCE linting, shadow replay to CEL/Cedar, and a Go Envoy ext_proc sidecar. 2 Python deps." />
+  <meta property="og:image" content="https://tony-stark2025.github.io/piton/og-card.png" />
+  <meta property="og:image:width" content="1280" />
+  <meta property="og:image:height" content="640" />
+
+  <!-- Twitter / X Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:creator" content="@bladeofshanghai" />
+  <meta name="twitter:title" content="Piton — The Lockfile for MCP &amp; AI Coding Agents" />
+  <meta name="twitter:description" content="Pin MCP schemas &amp; descriptions with split SHA-256 hashes, catch .claude/settings.json hook RCE in CI, and export CEL/Cedar policies." />
+  <meta name="twitter:image" content="https://tony-stark2025.github.io/piton/og-card.png" />
+
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23f97316'/%3E%3Ctext x='16' y='21' text-anchor='middle' font-family='monospace' font-weight='700' font-size='15' fill='%230b0e14'%3E%3E_%3C/text%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #0b1020;
-      --surface: #0d1117;
-      --surface-2: #161b22;
-      --border: #2b364f;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --accent: #67e8f9;
-      --green: #4ade80;
-      --red: #ff6b6b;
-      --amber: #f6c177;
+      --bg: #0b0e14;
+      --surface: #111622;
+      --surface-2: #161c2a;
+      --border: rgba(255, 255, 255, 0.1);
+      --border-strong: rgba(255, 255, 255, 0.18);
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #f97316;
+      --accent-soft: #fb923c;
+      --cyan: #7dd3fc;
+      --green: #34d399;
+      --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
     }
     * { box-sizing: border-box; }
+    html { -webkit-font-smoothing: antialiased; }
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
-      background: linear-gradient(180deg, #0b1020 0%, #0d1117 100%);
+      font-family: var(--font-sans);
+      background:
+        radial-gradient(ellipse 760px 460px at 84% 0%, rgba(249, 115, 22, 0.11), transparent 60%),
+        var(--bg);
       color: var(--text);
-      line-height: 1.6;
+      line-height: 1.62;
     }
-    .wrap { max-width: 920px; margin: 0 auto; padding: 48px 24px 80px; }
-    nav { display: flex; justify-content: space-between; align-items: center; margin-bottom: 56px; }
-    .brand { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; font-size: 1.15rem; color: var(--text); text-decoration: none; letter-spacing: 0.04em; }
-    .brand span { color: var(--accent); }
-    .nav-links a { color: var(--muted); text-decoration: none; margin-left: 20px; font-size: 0.95rem; }
+    .wrap { max-width: 960px; margin: 0 auto; padding: 40px 24px 88px; }
+    nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 60px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-family: var(--font-mono);
+      font-weight: 600;
+      font-size: 1.1rem;
+      color: var(--text);
+      text-decoration: none;
+      letter-spacing: -0.02em;
+    }
+    .brand-mark {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      background: var(--accent);
+      color: #0b0e14;
+      display: grid;
+      place-items: center;
+      font-size: 0.85rem;
+      font-weight: 700;
+    }
+    .brand-meta { color: var(--muted); font-weight: 400; font-size: 0.85rem; }
+    .nav-links { display: flex; flex-wrap: wrap; gap: 20px; align-items: center; }
+    .nav-links a { color: var(--muted); text-decoration: none; font-size: 0.92rem; transition: color 0.15s ease; }
     .nav-links a:hover { color: var(--text); }
-    h1 { font-size: clamp(2rem, 4.5vw, 3rem); line-height: 1.15; margin: 0 0 16px; letter-spacing: -0.02em; }
-    .lead { font-size: 1.15rem; color: var(--muted); max-width: 720px; margin: 0 0 28px; }
-    .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 40px; }
-    .btn { display: inline-block; padding: 11px 18px; border-radius: 8px; font-weight: 600; text-decoration: none; font-size: 0.95rem; }
-    .btn-primary { background: var(--accent); color: #0b1020; }
-    .btn-secondary { border: 1px solid var(--border); color: var(--text); background: var(--surface-2); }
-    pre {
+    h1 {
+      font-size: clamp(2.15rem, 4.6vw, 3.35rem);
+      line-height: 1.08;
+      margin: 0 0 18px;
+      letter-spacing: -0.04em;
+      font-weight: 700;
+      max-width: 780px;
+    }
+    .lead { font-size: 1.12rem; color: var(--muted); max-width: 720px; margin: 0 0 28px; }
+    .cta-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 36px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 18px;
+      border-radius: 8px;
+      font-weight: 600;
+      text-decoration: none;
+      font-size: 0.92rem;
+      transition: transform 0.12s ease, background 0.15s ease, border-color 0.15s ease;
+    }
+    .btn:active { transform: translateY(1px); }
+    .btn-primary { background: var(--accent); color: #0b0e14; }
+    .btn-primary:hover { background: var(--accent-soft); }
+    .btn-secondary { border: 1px solid var(--border-strong); color: var(--text); background: var(--surface-2); }
+    .btn-secondary:hover { border-color: rgba(255, 255, 255, 0.32); }
+
+    .code-shell {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 12px;
+      overflow: hidden;
+      margin: 18px 0;
+    }
+    .code-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 16px;
+      background: var(--surface-2);
+      border-bottom: 1px solid var(--border);
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .copy-btn {
+      background: transparent;
+      border: 1px solid var(--border-strong);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      padding: 4px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    .copy-btn:hover { background: rgba(255, 255, 255, 0.06); }
+    pre {
+      margin: 0;
       padding: 18px 20px;
       overflow-x: auto;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.9rem;
-      line-height: 1.55;
+      font-family: var(--font-mono);
+      font-size: 0.88rem;
+      line-height: 1.6;
     }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; margin: 40px 0; }
-    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
-    .card h3 { margin: 0 0 8px; font-size: 1.05rem; color: var(--accent); }
-    .card p { margin: 0; color: var(--muted); font-size: 0.94rem; }
-    .demo-img { width: 100%; border-radius: 12px; border: 1px solid var(--border); margin: 28px 0; display: block; }
-    h2 { margin: 48px 0 14px; font-size: 1.45rem; }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; color: var(--accent); }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 22px; }
+    .card h3 { margin: 0 0 8px; font-size: 1.04rem; color: var(--accent-soft); letter-spacing: -0.01em; }
+    .card p { margin: 0; color: var(--muted); font-size: 0.93rem; }
+    .demo-img { width: 100%; border-radius: 12px; border: 1px solid var(--border); margin: 32px 0; display: block; }
+    h2 { margin: 48px 0 12px; font-size: 1.45rem; letter-spacing: -0.025em; }
+    p.sub { color: var(--muted); margin: 0 0 14px; font-size: 0.96rem; }
+    code { font-family: var(--font-mono); font-size: 0.88em; color: var(--cyan); }
     pre code { color: var(--text); }
-    footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.88rem; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-    footer a { color: var(--muted); }
+    footer {
+      margin-top: 68px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.86rem;
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--text); }
   </style>
 </head>
 <body>
   <div class="wrap">
     <nav>
-      <a class="brand" href="https://github.com/Tony-Stark2025/piton"><span>&gt;_</span> piton</a>
+      <a class="brand" href="https://github.com/Tony-Stark2025/piton">
+        <span class="brand-mark">&gt;_</span>
+        piton <span class="brand-meta">v0.4.2</span>
+      </a>
       <div class="nav-links">
         <a href="https://github.com/Tony-Stark2025/piton">GitHub</a>
-        <a href="https://github.com/Tony-Stark2025/piton/releases">Releases</a>
-        <a href="https://github.com/Tony-Stark2025/piton#30-second-quickstart">Quickstart</a>
+        <a href="https://pypi.org/project/piton-cli/">PyPI</a>
+        <a href="https://github.com/Tony-Stark2025/piton-vuln-demo">Vuln Demo</a>
+        <a href="https://www.gaussianlabs.dev">Gaussian Labs</a>
       </div>
     </nav>
 
-    <h1>Lockfile and static supply-chain scanner for MCP servers and coding agents.</h1>
+    <h1>The lockfile and supply-chain scanner for MCP servers and coding agents.</h1>
     <p class="lead">
       Pin MCP tool schemas and descriptions with split SHA-256 hashes, catch malicious <code>.claude/settings.json</code> hooks and bidi-poisoned <code>.cursor/rules</code> in CI, and replay shadow traces offline to export CEL or Cedar policies. Two Python runtime dependencies: <code>pydantic</code> and <code>pyyaml</code>.
     </p>
@@ -79,23 +203,30 @@
     <div class="cta-row">
       <a class="btn btn-primary" href="https://github.com/Tony-Stark2025/piton">View on GitHub</a>
       <a class="btn btn-secondary" href="https://pypi.org/project/piton-cli/">PyPI (piton-cli)</a>
+      <a class="btn btn-secondary" href="https://github.com/Tony-Stark2025/piton-vuln-demo">Try Vulnerable Demo Repo</a>
       <a class="btn btn-secondary" href="https://github.com/Tony-Stark2025/piton/releases/tag/v0.4.2">Release v0.4.2</a>
     </div>
 
-    <pre><code># Zero-install instant scan:
+    <div class="code-shell">
+      <div class="code-bar">
+        <span>30-Second Quickstart</span>
+        <button type="button" class="copy-btn" data-copy="quickstart-code">Copy</button>
+      </div>
+      <pre><code id="quickstart-code"># Zero-install instant scan:
 uvx piton-cli scan --repo .
 
-# Or install via pipx / pip:
+# Or test it right now against an intentionally poisoned demo repo (8 CRITICAL/HIGH findings):
+git clone https://github.com/Tony-Stark2025/piton-vuln-demo.git &amp;&amp; uvx piton-cli scan --repo piton-vuln-demo
+
+# Install permanently via pipx or pip:
 pipx install piton-cli   # or: pip install piton-cli
 
-# 1. Scan repo for Claude Code hook RCE, VS Code folderOpen tasks &amp; poisoned rules
-piton scan --repo .
-
-# 2. Pin MCP servers with split SHA-256 hashes (structural vs. description)
+# Pin MCP servers with split SHA-256 hashes (structural vs. description):
 piton init --repo . --probe
 
-# 3. Wrap any local STDIO MCP server in Cursor or Claude Code
+# Wrap any local STDIO MCP server in Cursor or Claude Code:
 piton wrap --enforce --server github -- npx -y @modelcontextprotocol/server-github</code></pre>
+    </div>
 
     <img class="demo-img" src="./piton_demo.gif" alt="Piton CLI live demo: piton scan, piton init, piton lock --diff, and piton replay exporting Cedar" />
 
@@ -115,15 +246,50 @@ piton wrap --enforce --server github -- npx -y @modelcontextprotocol/server-gith
     </div>
 
     <h2>Drop Into GitHub Actions</h2>
-    <pre><code>- name: Piton — AI Agent Supply-Chain &amp; MCP Lockfile Gate
+    <p class="sub">Fails pull requests on third-party MCP rug pulls, structural schema drift, cross-server tool shadowing, and coding-agent config RCE.</p>
+    <div class="code-shell">
+      <div class="code-bar">
+        <span>.github/workflows/piton.yml</span>
+        <button type="button" class="copy-btn" data-copy="gha-code">Copy</button>
+      </div>
+      <pre><code id="gha-code">- name: Piton — AI Agent Supply-Chain &amp; MCP Lockfile Gate
   uses: Tony-Stark2025/piton@v0.4.2
   with:
     scan-only: "true" # or probe: "true" to also diff live MCP manifests</code></pre>
+    </div>
+
+    <h2>Enterprise Envoy Sidecar (GHCR)</h2>
+    <p class="sub">Multi-arch distroless Go sidecar (<code>linux/amd64</code>, <code>linux/arm64</code>) implementing Envoy v3 <code>ext_proc</code> gRPC with live <code>tools/list</code> rug-pull blocking, OIDC JWKS + RFC 8693 OBO, and response projection.</p>
+    <div class="code-shell">
+      <div class="code-bar">
+        <span>GHCR &amp; Helm</span>
+        <button type="button" class="copy-btn" data-copy="helm-code">Copy</button>
+      </div>
+      <pre><code id="helm-code">docker pull ghcr.io/tony-stark2025/piton-sidecar:0.4.2
+
+helm install piton-sidecar ./deploy/helm/piton-sidecar \
+  --set image.repository=ghcr.io/tony-stark2025/piton-sidecar \
+  --set image.tag=0.4.2</code></pre>
+    </div>
 
     <footer>
-      <span>Piton v0.4.2 &middot; MIT License</span>
+      <span>Piton v0.4.2 &middot; MIT License &middot; Built by <a href="https://www.gaussianlabs.dev">Gaussian Labs</a></span>
       <span><a href="https://github.com/Tony-Stark2025/piton">github.com/Tony-Stark2025/piton</a></span>
     </footer>
   </div>
+
+  <script>
+    document.querySelectorAll('.copy-btn').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        var el = document.getElementById(btn.getAttribute('data-copy'));
+        if (!el) return;
+        try {
+          await navigator.clipboard.writeText(el.textContent);
+          btn.textContent = 'Copied';
+          setTimeout(function () { btn.textContent = 'Copy'; }, 1600);
+        } catch (_) {}
+      });
+    });
+  </script>
 </body>
 </html>
