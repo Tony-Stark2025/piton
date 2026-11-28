@@ -93,8 +93,65 @@ func (s *fakeRedisServer) handleConn(c net.Conn) {
 				_, _ = c.Write([]byte(":0\r\n"))
 			}
 		case "SET":
+			nx := false
+			for i := 3; i < len(args); i++ {
+				if strings.EqualFold(args[i], "NX") {
+					nx = true
+				}
+			}
+			if nx {
+				if _, exists := s.kv[args[1]]; exists {
+					_, _ = c.Write([]byte("$-1\r\n"))
+					break
+				}
+			}
 			s.kv[args[1]] = args[2]
 			_, _ = c.Write([]byte("+OK\r\n"))
+		case "EVAL":
+			// Emulate rollingWindowLuaScript atomically under s.mu
+			// args: EVAL script 1 key cutoffMs nowMs member val checkCalls maxCalls checkSum maxSum ttlSecs
+			if len(args) < 13 {
+				_, _ = c.Write([]byte("-ERR wrong number of arguments for EVAL\r\n"))
+				break
+			}
+			key := args[3]
+			cutoffMs, _ := strconv.ParseFloat(args[4], 64)
+			nowMs, _ := strconv.ParseFloat(args[5], 64)
+			member := args[6]
+			valNum, _ := strconv.ParseFloat(args[7], 64)
+			checkCalls := args[8] == "1"
+			maxCalls, _ := strconv.Atoi(args[9])
+			checkSum := args[10] == "1"
+			maxSum, _ := strconv.ParseFloat(args[11], 64)
+
+			if s.zsets[key] == nil {
+				s.zsets[key] = make(map[string]float64)
+			}
+			for m, sc := range s.zsets[key] {
+				if sc <= cutoffMs {
+					delete(s.zsets[key], m)
+				}
+			}
+			curCalls := 0
+			var curSum float64
+			for m := range s.zsets[key] {
+				curCalls++
+				if idx := strings.LastIndex(m, ":"); idx >= 0 {
+					if f, err := strconv.ParseFloat(m[idx+1:], 64); err == nil {
+						curSum += f
+					}
+				}
+			}
+			nextCalls := curCalls + 1
+			nextSum := curSum + valNum
+			allowed := 1
+			if (checkCalls && nextCalls > maxCalls) || (checkSum && nextSum > maxSum) {
+				allowed = 0
+			} else {
+				s.zsets[key][member] = nowMs
+			}
+			sumStr := fmt.Sprintf("%.6f", nextSum)
+			_, _ = c.Write([]byte(fmt.Sprintf("*3\r\n:%d\r\n:%d\r\n$%d\r\n%s\r\n", allowed, nextCalls, len(sumStr), sumStr)))
 		case "INCR":
 			cur, _ := strconv.Atoi(s.kv[args[1]])
 			cur++
@@ -154,20 +211,47 @@ func TestRedisStoreMultiReplicaBudgetsAndIdempotency(t *testing.T) {
 		t.Fatalf("replicaA Ping failed: %v", err)
 	}
 
-	// 1. Shared idempotency across replicas
-	exists, err := replicaA.CheckIdempotency("billing::refund::req-1")
-	if err != nil || exists {
-		t.Fatalf("expected non-existent idempotency key, got exists=%v err=%v", exists, err)
+	// 1. Atomic shared idempotency across replicas under concurrent contention
+	const workers = 16
+	var wg sync.WaitGroup
+	var winMu sync.Mutex
+	wins := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			st := replicaA
+			if idx%2 == 1 {
+				st = replicaB
+			}
+			acq, err := st.ReserveIdempotency("billing::refund::req-concurrent", time.Hour)
+			if err != nil {
+				t.Errorf("ReserveIdempotency error: %v", err)
+				return
+			}
+			if acq {
+				winMu.Lock()
+				wins++
+				winMu.Unlock()
+			}
+		}(i)
 	}
-	if err := replicaA.CommitIdempotency("billing::refund::req-1", time.Hour); err != nil {
-		t.Fatalf("commit idempotency failed: %v", err)
-	}
-	existsB, err := replicaB.CheckIdempotency("billing::refund::req-1")
-	if err != nil || !existsB {
-		t.Fatalf("expected replicaB to observe committed idempotency key, got exists=%v err=%v", existsB, err)
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("expected exactly 1 winner for concurrent ReserveIdempotency, got %d", wins)
 	}
 
-	// 2. Shared trace counter across replicas
+	// 2. Atomic single-use MRTR nonce consumption across replicas
+	firstUse, err := replicaA.ConsumeMRTRNonce("jti-abc-123", 10*time.Minute)
+	if err != nil || !firstUse {
+		t.Fatalf("expected first MRTR nonce consume to succeed, got %v err=%v", firstUse, err)
+	}
+	secondUse, err := replicaB.ConsumeMRTRNonce("jti-abc-123", 10*time.Minute)
+	if err != nil || secondUse {
+		t.Fatalf("expected second MRTR nonce replay to fail, got %v err=%v", secondUse, err)
+	}
+
+	// 3. Shared trace counter across replicas
 	c1, err := replicaA.IncrTraceCount("trace-1::billing::refund", time.Hour)
 	if err != nil || c1 != 1 {
 		t.Fatalf("expected count=1, got %d err=%v", c1, err)
@@ -177,22 +261,33 @@ func TestRedisStoreMultiReplicaBudgetsAndIdempotency(t *testing.T) {
 		t.Fatalf("expected count=2 across replicas, got %d err=%v", c2, err)
 	}
 
-	// 3. Shared rolling 1h monetary sum across replicas (defeats multi-pod smurfing)
+	// 4. Atomic rolling 1h budget enforcement across replicas under concurrency (budget=100, each call=40 -> max 2 allowed)
 	now := time.Now()
-	if err := replicaA.RecordRollingSample("user:alice::refund", now.Add(-2*time.Hour), time.Hour, 999.0); err != nil {
-		t.Fatalf("record old sample: %v", err)
+	budgetWins := 0
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			st := replicaA
+			if idx%2 == 1 {
+				st = replicaB
+			}
+			_, _, allowed, err := st.CheckAndRecordRollingWindow(
+				"user:bob::refund", now, time.Hour, 40.0, 0, 100.0, false, true,
+			)
+			if err != nil {
+				t.Errorf("CheckAndRecordRollingWindow error: %v", err)
+				return
+			}
+			if allowed {
+				winMu.Lock()
+				budgetWins++
+				winMu.Unlock()
+			}
+		}(i)
 	}
-	if err := replicaA.RecordRollingSample("user:alice::refund", now.Add(-5*time.Minute), time.Hour, 40.0); err != nil {
-		t.Fatalf("record sample A: %v", err)
-	}
-	if err := replicaB.RecordRollingSample("user:alice::refund", now.Add(-1*time.Minute), time.Hour, 45.0); err != nil {
-		t.Fatalf("record sample B: %v", err)
-	}
-	calls, sum, err := replicaB.GetRollingWindow("user:alice::refund", now, time.Hour)
-	if err != nil {
-		t.Fatalf("GetRollingWindow failed: %v", err)
-	}
-	if calls != 2 || sum < 84.99 || sum > 85.01 {
-		t.Fatalf("expected calls=2 sum=85.00 (old 2h sample pruned), got calls=%d sum=%.2f", calls, sum)
+	wg.Wait()
+	if budgetWins != 2 {
+		t.Fatalf("expected exactly 2 calls allowed within $100 budget ($40 each), got %d", budgetWins)
 	}
 }

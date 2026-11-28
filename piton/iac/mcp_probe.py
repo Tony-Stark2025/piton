@@ -214,6 +214,43 @@ def probe_http_mcp_tools(
     return all_tools
 
 
+_SAFE_PROBE_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "TEMP",
+    "TMP",
+    "USER",
+    "LOGNAME",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "PATHEXT",
+    "VIRTUAL_ENV",
+    "PYTHONPATH",
+    "NODE_PATH",
+)
+
+
+def _build_scrubbed_probe_env(explicit_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """
+    Constructs a minimal, secret-scrubbed environment for STDIO MCP probes so
+    untrusted repository commands never inherit host credentials (AWS_*,
+    ANTHROPIC_API_KEY, OPENAI_API_KEY, GH_TOKEN, STRIPE_*, etc.).
+    """
+    clean: Dict[str, str] = {}
+    for k in _SAFE_PROBE_ENV_KEYS:
+        val = os.environ.get(k)
+        if val is not None:
+            clean[k] = val
+    if explicit_env:
+        clean.update(explicit_env)
+    return clean
+
+
 def probe_stdio_mcp_tools(
     command: str,
     args: Optional[List[str]] = None,
@@ -221,9 +258,9 @@ def probe_stdio_mcp_tools(
     timeout: float = 8.0,
 ) -> List[Dict[str, Any]]:
     """
-    Launches a local STDIO MCP server (no shell=True!), performs MCP `initialize` ->
-    `notifications/initialized` -> paginated `tools/list`, enforces non-blocking read
-    timeouts, and cleanly terminates the subprocess.
+    Launches a local STDIO MCP server (no shell=True!, scrubbed env!), performs MCP
+    `initialize` -> `notifications/initialized` -> paginated `tools/list`, enforces
+    non-blocking read timeouts, and cleanly terminates the subprocess.
     """
     argv = [command, *(args or [])]
     proc = subprocess.Popen(
@@ -231,7 +268,7 @@ def probe_stdio_mcp_tools(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env=env or os.environ.copy(),
+        env=_build_scrubbed_probe_env(env),
         text=True,
     )
     assert proc.stdin is not None and proc.stdout is not None
@@ -348,8 +385,12 @@ def probe_stdio_mcp_tools(
 def probe_configured_servers(
     config: AgentIaCConfig,
     timeout: float = 8.0,
+    allow_stdio_exec: bool = False,
 ) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, str]]:
-    """Probes all HTTP and STDIO MCP servers declared in `piton.yaml`."""
+    """
+    Probes HTTP/SSE MCP servers declared in `piton.yaml`. Local STDIO MCP commands
+    are NOT executed unless `allow_stdio_exec=True` is explicitly provided.
+    """
     manifests: Dict[str, List[Dict[str, Any]]] = {}
     errors: Dict[str, str] = {}
     for srv_name, srv in config.mcp_servers.items():
@@ -357,6 +398,12 @@ def probe_configured_servers(
             if srv.url:
                 manifests[srv_name] = probe_http_mcp_tools(srv.url, timeout=timeout)
             elif srv.command:
+                if not allow_stdio_exec:
+                    errors[srv_name] = (
+                        "Refused to execute local STDIO MCP command without --allow-stdio-exec "
+                        "(supply-chain RCE safeguard)."
+                    )
+                    continue
                 manifests[srv_name] = probe_stdio_mcp_tools(srv.command, srv.args, timeout=timeout)
         except Exception as exc:
             errors[srv_name] = str(exc)

@@ -79,7 +79,10 @@ runs:
 
         LOCK_OUT=""
         LOCK_RC=0
-        if [ "${INPUT_SCAN_ONLY}" != "true" ]; then
+        if [ "${SCAN_RC}" -ne 0 ] && [ "${INPUT_SCAN_ONLY}" != "true" ]; then
+          LOCK_OUT="Skipped MCP lockfile probing/diff because static coding-agent supply-chain scan failed (scan_rc=${SCAN_RC})."
+          printf '%s\n' "${LOCK_OUT}"
+        elif [ "${INPUT_SCAN_ONLY}" != "true" ]; then
           CFG="${INPUT_CONFIG:-piton.yaml}"
           LOCK="${INPUT_LOCKFILE:-piton.lock}"
 

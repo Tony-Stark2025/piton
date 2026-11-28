@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "piton-cli"
-version = "0.4.2"
+version = "0.4.3"
 description = "Piton — Lockfile and static supply-chain scanner for MCP servers, Claude Code hooks, and Cursor rules"
 readme = "README.md"
 license = {text = "MIT"}
@@ -13,13 +13,29 @@ authors = [
     {name = "Bright Onwe"}
 ]
 keywords = ["piton", "mcp", "ai-agents", "claude-code", "cursor", "security", "envoy", "ext-proc", "supply-chain", "ci-cd"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+]
 dependencies = [
     "pydantic>=2.6.0",
     "pyyaml>=6.0.1",
 ]
 
 [project.urls]
-Homepage = "https://github.com/Tony-Stark2025/piton"
+Homepage = "https://www.gaussianlabs.dev"
+Documentation = "https://tony-stark2025.github.io/piton/"
 Repository = "https://github.com/Tony-Stark2025/piton"
 Issues = "https://github.com/Tony-Stark2025/piton/issues"
 

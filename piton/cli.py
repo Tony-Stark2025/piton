@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import subprocess
 import sys
@@ -44,7 +45,7 @@ from piton.iac.replay import (
     load_otel_or_ledger_records,
     replay_traces,
 )
-from piton.iac.schema import AgentIaCConfig, ManifestLockfile, TrustTier
+from piton.iac.schema import AgentIaCConfig, EnforcementMode, ManifestLockfile, TrustTier
 
 
 def _default_config_name() -> str:
@@ -85,16 +86,37 @@ def _cmd_scan(args: argparse.Namespace) -> int:
 
 def _cmd_init(args: argparse.Namespace) -> int:
     repo = Path(args.repo).resolve()
+    # Always run static coding-agent supply-chain scan BEFORE any live probing to prevent RCE.
+    agent_cfg_scan = scan_agent_supply_chain(repo)
+    quarantined_mcp_servers = {
+        f.field_path.split(".", 1)[1]
+        for f in agent_cfg_scan.findings
+        if f.server_name == "mcp-config"
+        and f.severity.value in ("critical", "high")
+        and f.field_path.startswith("mcpServers.")
+    }
+
     live_tools: Optional[Dict[str, List[Dict[str, Any]]]] = None
     if args.manifest:
         live_tools = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
     elif args.probe:
-        # First pass discovers MCP server URLs/commands from repo configs, then probes them live!
-        pre = scan_repository(repo_root=repo, agent_id=args.agent_id, owner=args.owner)
-        probed, probe_errs = probe_configured_servers(pre.config, timeout=args.probe_timeout)
-        live_tools = probed
-        for srv_name, err in probe_errs.items():
-            print(f"[warn] Live probe failed for MCP server '{srv_name}': {err}", file=sys.stderr)
+        if agent_cfg_scan.critical_or_high_count > 0 and not args.allow_poisoned:
+            print(
+                f"[BLOCK] Refusing to live-probe MCP servers because static scan flagged "
+                f"{agent_cfg_scan.critical_or_high_count} CRITICAL/HIGH supply-chain finding(s).",
+                file=sys.stderr,
+            )
+        else:
+            # First pass discovers MCP server URLs/commands from repo configs, then probes safely.
+            pre = scan_repository(repo_root=repo, agent_id=args.agent_id, owner=args.owner)
+            probed, probe_errs = probe_configured_servers(
+                pre.config,
+                timeout=args.probe_timeout,
+                allow_stdio_exec=getattr(args, "allow_stdio_exec", False),
+            )
+            live_tools = probed
+            for srv_name, err in probe_errs.items():
+                print(f"[warn] Live probe skipped/failed for MCP server '{srv_name}': {err}", file=sys.stderr)
 
     res = scan_repository(
         repo_root=repo,
@@ -103,9 +125,13 @@ def _cmd_init(args: argparse.Namespace) -> int:
         live_server_tools=live_tools,
         allow_poisoned=args.allow_poisoned,
     )
+    if quarantined_mcp_servers and not args.allow_poisoned:
+        for srv_name in quarantined_mcp_servers:
+            res.config.mcp_servers.pop(srv_name, None)
+            res.lockfile.servers.pop(srv_name, None)
+
     paths = write_init_artifacts(repo, res)
 
-    agent_cfg_scan = scan_agent_supply_chain(repo)
     print(f"Piton initialized for agent '{res.config.agent.id}' (mode={res.config.agent.mode.value})")
     all_discovered = list(dict.fromkeys(res.discovered_files + agent_cfg_scan.scanned_files))
     print(f"  Discovered files: {', '.join(all_discovered) or 'none'}")
@@ -119,8 +145,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
             target = f"{f.server_name}: {f.tool_name}" if f.server_name in ("agent-config", "agent-rules", "mcp-config") else f"{f.server_name}.{f.tool_name}"
             print(f"  - [{f.severity.value.upper()}] {target} ({f.rule_id}): {f.message}")
         if not args.allow_poisoned:
-            if any(f.severity.value in ("critical", "high") for f in res.poisoning_findings):
-                print("  Quarantined CRITICAL/HIGH MCP tools were excluded from piton.yaml and piton.lock.")
+            if any(f.severity.value in ("critical", "high") for f in res.poisoning_findings) or quarantined_mcp_servers:
+                print("  Quarantined CRITICAL/HIGH MCP servers/tools were excluded from piton.yaml and piton.lock.")
             return 2
     return 0
 
@@ -140,9 +166,24 @@ def _cmd_lock(args: argparse.Namespace) -> int:
             manifest_path.read_text(encoding="utf-8")
         )
     elif args.probe and config is not None:
-        manifest_data, probe_errs = probe_configured_servers(config, timeout=getattr(args, "probe_timeout", 8.0))
+        if not getattr(args, "no_agent_scan", False):
+            repo_dir = Path(getattr(args, "repo", ".") or ".").resolve()
+            if repo_dir.is_dir():
+                pre_scan = scan_agent_supply_chain(repo_dir)
+                if pre_scan.critical_or_high_count > 0 and not args.allow_poisoned:
+                    print(
+                        f"[BLOCK] Refusing to live-probe MCP servers because static scan flagged "
+                        f"{pre_scan.critical_or_high_count} CRITICAL/HIGH supply-chain finding(s).",
+                        file=sys.stderr,
+                    )
+                    return 1
+        manifest_data, probe_errs = probe_configured_servers(
+            config,
+            timeout=getattr(args, "probe_timeout", 8.0),
+            allow_stdio_exec=getattr(args, "allow_stdio_exec", False),
+        )
         for srv_name, err in probe_errs.items():
-            print(f"[warn] Live probe failed for MCP server '{srv_name}': {err}", file=sys.stderr)
+            print(f"[warn] Live probe skipped/failed for MCP server '{srv_name}': {err}", file=sys.stderr)
     else:
         print("Error: provide --manifest <json> or --probe with piton.yaml.", file=sys.stderr)
         return 1
@@ -567,7 +608,18 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
         return 1
     config = AgentIaCConfig.load_file(cfg_path)
     lockfile = ManifestLockfile.load_file(Path(args.lockfile)) if Path(args.lockfile).is_file() else None
-    signing_key = os.getenv("PITON_LEDGER_SIGNING_KEY", "piton-ledger-signing-key").encode("utf-8")
+    enforce_mode = bool(getattr(args, "enforce", False)) or config.agent.mode == EnforcementMode.ENFORCE
+    raw_signing_key = os.getenv("PITON_LEDGER_SIGNING_KEY", "").strip()
+    if not raw_signing_key:
+        if enforce_mode and args.traces and not getattr(args, "insecure_dev_key", False):
+            print(
+                "Error: PITON_LEDGER_SIGNING_KEY must be set in enforce mode (refusing hardcoded fallback; "
+                "pass --insecure-dev-key only for local development).",
+                file=sys.stderr,
+            )
+            return 1
+        raw_signing_key = "piton-ledger-signing-key"
+    signing_key = raw_signing_key.encode("utf-8")
     ledger = SignedDecisionLedger(Path(args.traces), signing_key=signing_key) if args.traces else None
     return wrap_stdio_mcp(
         args.server,
@@ -582,8 +634,26 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
 def _cmd_control_plane(args: argparse.Namespace) -> int:
     from piton.control_plane.server import create_control_plane_server
 
-    signing_key = os.getenv("PITON_LEDGER_SIGNING_KEY", "piton-ledger-signing-key").encode("utf-8")
-    api_key = os.getenv("PITON_CONTROL_API_KEY", "")
+    raw_signing_key = os.getenv("PITON_LEDGER_SIGNING_KEY", "").strip()
+    if not raw_signing_key:
+        if not getattr(args, "insecure_dev_key", False):
+            print(
+                "Error: PITON_LEDGER_SIGNING_KEY must be set for piton control-plane "
+                "(refusing hardcoded fallback; pass --insecure-dev-key only for local development).",
+                file=sys.stderr,
+            )
+            return 1
+        raw_signing_key = "piton-ledger-signing-key"
+    signing_key = raw_signing_key.encode("utf-8")
+
+    api_key = os.getenv("PITON_CONTROL_API_KEY", "").strip()
+    if not api_key and not getattr(args, "insecure_no_auth", False):
+        api_key = secrets.token_urlsafe(24)
+        print(
+            f"[piton] PITON_CONTROL_API_KEY was unset; generated ephemeral API key for this session: {api_key}\n"
+            f"[piton] Pass via X-Piton-Control-Key header or enter it in the Control Plane Web UI.",
+            file=sys.stderr,
+        )
     slack_webhook = args.slack_webhook or os.getenv("PITON_SLACK_WEBHOOK_URL", "")
     slack_secret = os.getenv("PITON_SLACK_SIGNING_SECRET", "")
 
@@ -633,7 +703,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--agent-id", default=None, help="Explicit agent ID")
     p_init.add_argument("--owner", default="platform-team@example.com", help="Owning team email")
     p_init.add_argument("--manifest", default=None, help="Optional JSON file mapping server_name -> tools/list array")
-    p_init.add_argument("--probe", action="store_true", help="Live-probe discovered HTTP/STDIO MCP servers for tools/list")
+    p_init.add_argument("--probe", action="store_true", help="Live-probe discovered HTTP/SSE MCP servers for tools/list")
+    p_init.add_argument("--allow-stdio-exec", action="store_true", help="Explicitly allow executing local STDIO MCP commands during --probe (scrubbed env)")
     p_init.add_argument("--probe-timeout", type=float, default=8.0, help="Per-server live probe timeout in seconds")
     p_init.add_argument("--allow-poisoned", action="store_true", help="Include tools even if poisoning lint flags them")
     p_init.set_defaults(func=_cmd_init)
@@ -661,6 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_wrap.add_argument("--lockfile", default=lock_default)
     p_wrap.add_argument("--traces", default=".piton/traces.jsonl")
     p_wrap.add_argument("--enforce", action="store_true", help="Hard-block rug pulls & bound violations even if piton.yaml is in shadow mode")
+    p_wrap.add_argument("--insecure-dev-key", action="store_true", help="Allow default local dev signing key when PITON_LEDGER_SIGNING_KEY is unset")
     p_wrap.add_argument("cmd", nargs=argparse.REMAINDER, help="STDIO MCP server command (prefix with --)")
     p_wrap.set_defaults(func=_cmd_wrap)
 
@@ -669,13 +741,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_cp.add_argument("--port", type=int, default=8090)
     p_cp.add_argument("--db", default=".piton/control_plane.db")
     p_cp.add_argument("--slack-webhook", default="", help="Optional Slack Incoming Webhook URL for MRTR Block Kit prompts")
+    p_cp.add_argument("--insecure-dev-key", action="store_true", help="Allow default local dev signing key when PITON_LEDGER_SIGNING_KEY is unset")
+    p_cp.add_argument("--insecure-no-auth", action="store_true", help="Disable API key authentication on Control Plane (local dev only)")
     p_cp.set_defaults(func=_cmd_control_plane)
 
     p_lock = sub.add_parser("lock", help="Verify, diff, or update split-hash MCP pins & agent hook/skill supply-chain checks")
     p_lock.add_argument("--repo", default=".", help="Repository path to also lint for coding-agent hook/skill poisoning")
     p_lock.add_argument("--no-agent-scan", action="store_true", help="Skip static repo hook/rule scan (e.g. when piton scan already ran)")
     p_lock.add_argument("--manifest", default=None, help="JSON file mapping server_name -> observed tools/list array")
-    p_lock.add_argument("--probe", action="store_true", help="Live-probe MCP servers from config instead of static JSON")
+    p_lock.add_argument("--probe", action="store_true", help="Live-probe HTTP/SSE MCP servers from config instead of static JSON")
+    p_lock.add_argument("--allow-stdio-exec", action="store_true", help="Explicitly allow executing local STDIO MCP commands during --probe (scrubbed env)")
     p_lock.add_argument("--probe-timeout", type=float, default=8.0, help="Per-server live probe timeout in seconds")
     p_lock.add_argument("--lockfile", default=lock_default)
     p_lock.add_argument("--config", default=cfg_default)

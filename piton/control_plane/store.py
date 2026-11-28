@@ -288,18 +288,27 @@ class ControlPlaneStore:
             row = self._conn.execute("SELECT * FROM mrtr_approvals WHERE id = ?", (esc_id,)).fetchone()
             return self._row_to_escalation(row) if row else None
 
-    def list_escalations(self, status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    def list_escalations(
+        self,
+        status: Optional[str] = None,
+        limit: int = 100,
+        agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         with self._lock:
+            clauses: List[str] = []
+            params: List[Any] = []
             if status:
-                rows = self._conn.execute(
-                    "SELECT * FROM mrtr_approvals WHERE status = ? ORDER BY created_at DESC LIMIT ?",
-                    (status, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM mrtr_approvals ORDER BY created_at DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
+                clauses.append("status = ?")
+                params.append(status)
+            if agent_id:
+                clauses.append("agent_id = ?")
+                params.append(agent_id)
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+            params.append(limit)
+            rows = self._conn.execute(
+                f"SELECT * FROM mrtr_approvals {where} ORDER BY created_at DESC LIMIT ?",
+                tuple(params),
+            ).fetchall()
             return [self._row_to_escalation(r) for r in rows]
 
     def decide_escalation(
@@ -414,38 +423,72 @@ class ControlPlaneStore:
                 out.append(item)
             return out
 
-    def list_drift_events(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def list_drift_events(self, limit: int = 50, agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM drift_events ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
+            if agent_id:
+                rows = self._conn.execute(
+                    "SELECT * FROM drift_events WHERE agent_id = ? ORDER BY id DESC LIMIT ?",
+                    (agent_id, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM drift_events ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_fleet_readiness(self) -> Dict[str, Any]:
+    def get_fleet_readiness(self, agent_id: Optional[str] = None) -> Dict[str, Any]:
         """Computes per-agent `shadow -> enforce` readiness scorecards across the fleet."""
         with self._lock:
-            ledger_rows = self._conn.execute(
-                """
-                SELECT
-                    agent_id,
-                    COUNT(*) AS total_calls,
-                    SUM(CASE WHEN verdict = 'allow' THEN 1 ELSE 0 END) AS allowed_calls,
-                    SUM(CASE WHEN verdict = 'shadow_deny' THEN 1 ELSE 0 END) AS shadow_denied_calls,
-                    SUM(CASE WHEN verdict = 'deny' THEN 1 ELSE 0 END) AS denied_calls,
-                    SUM(CASE WHEN verdict = 'mrtr_escalate' THEN 1 ELSE 0 END) AS mrtr_escalated_calls,
-                    SUM(hmac_verified) AS verified_hmac_records,
-                    AVG(latency_ms) AS avg_latency_ms
-                FROM fleet_ledger
-                GROUP BY agent_id
-                ORDER BY total_calls DESC
-                """
-            ).fetchall()
-            drift_rows = self._conn.execute(
-                "SELECT agent_id, COUNT(*) AS drift_count FROM drift_events GROUP BY agent_id"
-            ).fetchall()
-            pending_mrtr = self._conn.execute(
-                "SELECT COUNT(*) AS cnt FROM mrtr_approvals WHERE status = 'pending'"
-            ).fetchone()["cnt"]
+            if agent_id:
+                ledger_rows = self._conn.execute(
+                    """
+                    SELECT
+                        agent_id,
+                        COUNT(*) AS total_calls,
+                        SUM(CASE WHEN verdict = 'allow' THEN 1 ELSE 0 END) AS allowed_calls,
+                        SUM(CASE WHEN verdict = 'shadow_deny' THEN 1 ELSE 0 END) AS shadow_denied_calls,
+                        SUM(CASE WHEN verdict = 'deny' THEN 1 ELSE 0 END) AS denied_calls,
+                        SUM(CASE WHEN verdict = 'mrtr_escalate' THEN 1 ELSE 0 END) AS mrtr_escalated_calls,
+                        SUM(hmac_verified) AS verified_hmac_records,
+                        AVG(latency_ms) AS avg_latency_ms
+                    FROM fleet_ledger
+                    WHERE agent_id = ?
+                    GROUP BY agent_id
+                    ORDER BY total_calls DESC
+                    """,
+                    (agent_id,),
+                ).fetchall()
+                drift_rows = self._conn.execute(
+                    "SELECT agent_id, COUNT(*) AS drift_count FROM drift_events WHERE agent_id = ? GROUP BY agent_id",
+                    (agent_id,),
+                ).fetchall()
+                pending_mrtr = self._conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM mrtr_approvals WHERE status = 'pending' AND agent_id = ?",
+                    (agent_id,),
+                ).fetchone()["cnt"]
+            else:
+                ledger_rows = self._conn.execute(
+                    """
+                    SELECT
+                        agent_id,
+                        COUNT(*) AS total_calls,
+                        SUM(CASE WHEN verdict = 'allow' THEN 1 ELSE 0 END) AS allowed_calls,
+                        SUM(CASE WHEN verdict = 'shadow_deny' THEN 1 ELSE 0 END) AS shadow_denied_calls,
+                        SUM(CASE WHEN verdict = 'deny' THEN 1 ELSE 0 END) AS denied_calls,
+                        SUM(CASE WHEN verdict = 'mrtr_escalate' THEN 1 ELSE 0 END) AS mrtr_escalated_calls,
+                        SUM(hmac_verified) AS verified_hmac_records,
+                        AVG(latency_ms) AS avg_latency_ms
+                    FROM fleet_ledger
+                    GROUP BY agent_id
+                    ORDER BY total_calls DESC
+                    """
+                ).fetchall()
+                drift_rows = self._conn.execute(
+                    "SELECT agent_id, COUNT(*) AS drift_count FROM drift_events GROUP BY agent_id"
+                ).fetchall()
+                pending_mrtr = self._conn.execute(
+                    "SELECT COUNT(*) AS cnt FROM mrtr_approvals WHERE status = 'pending'"
+                ).fetchone()["cnt"]
 
         drift_by_agent = {r["agent_id"]: int(r["drift_count"]) for r in drift_rows}
         agents = []
@@ -478,14 +521,23 @@ class ControlPlaneStore:
 
     def build_signed_audit_bundle(self, agent_id: Optional[str] = None) -> Dict[str, Any]:
         """Generates a tamper-evident SOC2 / EU AI Act signed compliance export bundle."""
+        mrtr_rows = self.list_escalations(limit=501, agent_id=agent_id)
+        drift_rows = self.list_drift_events(limit=501, agent_id=agent_id)
+        ledger_rows = self.list_recent_ledger(limit=1001, agent_id=agent_id)
+
         bundle_body = {
             "schema": "piton.compliance.audit_bundle.v1",
             "exported_at": time.time(),
             "agent_filter": agent_id or "*",
-            "fleet_readiness": self.get_fleet_readiness(),
-            "mrtr_approvals": self.list_escalations(limit=500),
-            "drift_events": self.list_drift_events(limit=500),
-            "decision_ledger": self.list_recent_ledger(limit=1000, agent_id=agent_id),
+            "fleet_readiness": self.get_fleet_readiness(agent_id=agent_id),
+            "mrtr_approvals": mrtr_rows[:500],
+            "drift_events": drift_rows[:500],
+            "decision_ledger": ledger_rows[:1000],
+            "truncated": {
+                "mrtr_approvals": len(mrtr_rows) > 500,
+                "drift_events": len(drift_rows) > 500,
+                "decision_ledger": len(ledger_rows) > 1000,
+            },
         }
         canonical = json.dumps(bundle_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
         bundle_sha256 = hashlib.sha256(canonical).hexdigest()
